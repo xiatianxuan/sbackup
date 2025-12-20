@@ -1,5 +1,10 @@
+from sbackup import run
+
 def main():
-    print("Hello from sbackup!")
+    try:
+        run()
+    except KeyboardInterrupt:
+        print("\nExit.")
 
 
 if __name__ == "__main__":
