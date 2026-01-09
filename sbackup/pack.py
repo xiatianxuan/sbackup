@@ -31,27 +31,23 @@ def zip_folder(
     :param skip_patterns: 跳过压缩的文件或文件夹
     :type skip_patterns: list
     """
-    #print(folder_path)
-    #print(zipfile_path)
     folder_path = os.path.abspath(folder_path)
+    
     if zipfile_path is None:
-
         zipfile_path = os.path.join(
             os.path.dirname(folder_path), os.path.basename(folder_path) + ".zip"
         )
-    if not zipfile_path.lower().endswith(".zip"):
-        #print(os.path.splitext(zipfile_path)[0])
-        if not os.path.splitext(zipfile_path)[0]:
-            zipfile_path = os.path.join(
-            os.path.dirname(folder_path), os.path.basename(folder_path) + ".zip"
-            )
-        else:
-            zipfile_path = os.path.splitext(zipfile_path)[0] + ".zip"
+    else:
+        zipfile_path = os.path.abspath(zipfile_path)
+        # 如果 zipfile_path 是一个目录（包括盘符根目录如 "G:/"），则在其中创建 ZIP
+        if os.path.isdir(zipfile_path):
+            zipfile_path = os.path.join(zipfile_path, os.path.basename(folder_path) + ".zip")
+        elif not zipfile_path.lower().endswith(".zip"):
+            zipfile_path += ".zip"
+
     if not os.path.isdir(folder_path):
-        #print(f"{folder_path} 不是一个有效的文件夹或不存在.")
+        print(f"{folder_path} 不是一个有效的文件夹或不存在.")
         return
-    #print(folder_path)
-    #print(zipfile_path)
     try:
         with zipfile.ZipFile(zipfile_path, "w", zipfile.ZIP_DEFLATED) as zipf:
             for root, dirs, files in os.walk(folder_path):
@@ -62,6 +58,7 @@ def zip_folder(
                     file_path = os.path.join(root, file)
                     arcname = os.path.relpath(file_path, os.path.dirname(folder_path))
                     zipf.write(file_path, arcname)
+        print(f"成功备份: {zipfile_path}")
     except PermissionError:
         print(f"权限不足：无法写入 '{zipfile_path}'")
     except OSError as e:

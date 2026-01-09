@@ -6,6 +6,13 @@ dist/
 wheels/
 *.egg-info
 .ruff_cache/
+*.build/
+*.dist/
+*.onefile-build/
+*.tmp/
+.vscode/
+*.exe
+sbackup.json
 
 # Virtual environments
 .venv

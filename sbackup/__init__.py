@@ -4,7 +4,7 @@ import sys
 VERSION = "0.0.1"
 help_string = f"""
 version: {VERSION}
-为你的文件保驾护航.
+为你的文件夹保驾护航.
         
 add   添加备份策略.
 rm, remove   删除备份策略.
@@ -13,7 +13,9 @@ save   备份所有文件夹.
 """
 
 def run():
-    command: str = sys.argv[1]
+    command: str = "help"
+    if len(sys.argv) > 1:
+        command = sys.argv[1]
     if command == "add":
         add_folder(input("备份文件夹:"), input("目标文件夹:"), input("需要忽略的文件夹或文件(用" "隔开):"))
     elif command == "rm" or command == "remove":
