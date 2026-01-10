@@ -52,6 +52,12 @@ Sbackup all
 Sbackup save
 ```
 
+#### 查看版本信息
+
+```powershell
+Sbackup version
+```
+
 ## 实现原理
 
 Sbackup根据文件夹的最后修改日期决定是否备份.
@@ -75,5 +81,3 @@ Sbackup根据文件夹的最后修改日期决定是否备份.
 ## 加入我们？
 
 请发送邮件到：xiatianxuan2025@163.com
-
-
