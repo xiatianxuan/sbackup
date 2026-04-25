@@ -1,0 +1,22 @@
+{
+  "cmd.add.success": "备份策略添加成功: {source} -> {dest}",
+  "cmd.rm.success": "备份策略删除成功: {path}",
+  "err.folder.invalid": "错误：{path} 不是有效的文件夹名或不存在。",
+  "err.dest.invalid": "错误：目标文件夹 {path} 不是有效的文件夹或不存在。",
+  "info.already.added": "提示：{path} 已经添加过了，请勿重复添加。",
+  "warn.no.strategy.found": "警告：未找到 {path} 的备份策略。",
+  "warn.source.missing": "警告：源文件夹不存在: {path}",
+  "warn.json.decode.error": "警告：数据文件 {path} 格式错误，初始化为空字典。",
+  "compress.success": "成功备份: {path} ({size:.2f} MB, {count} 个文件)",
+  "compress.progress": "正在压缩",
+  "compress.unit": "文件",
+  "err.permission": "权限不足：无法写入 '{path}'",
+  "err.os": "系统错误：{error}",
+  "err.unknown": "未知错误：{error}",
+  "cmd.all.empty": "没有配置任何备份策略。",
+  "exit.message": "\n已退出。",
+  "table.header.source": "源文件夹路径",
+  "table.header.dest": "目标文件夹路径",
+  "table.header.ignore": "忽略模式",
+  "table.cell.none": "无"
+}
