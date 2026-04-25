@@ -18,12 +18,17 @@ save   备份所有文件夹.
 version  查看版本信息.
 """
 
+
 def run():
     command: str = "help"
     if len(sys.argv) > 1:
         command = sys.argv[1]
     if command == "add":
-        add_folder(input("备份文件夹:"), input("目标文件夹:"), input("需要忽略的文件夹或文件(用" "隔开):"))
+        add_folder(
+            input("备份文件夹:"),
+            input("目标文件夹:"),
+            input("需要忽略的文件夹或文件(用隔开):"),
+        )
     elif command == "rm" or command == "remove":
         rm_folder(input("目标文件夹:"))
     elif command == "all":
