@@ -1,19 +1,39 @@
 import os
 import json
+import shutil
 import logging
-from sbackup._compression import Config, ZipfileCompression, load_config
+from dataclasses import dataclass
+from sbackup.config import Config, load_config, get_default_data_file, DEFAULT_SKIP_PATTERNS
+from sbackup.compression import ZipfileCompression
 from sbackup.i18n import t
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class BackupEntry:
+    """备份策略条目"""
+    mtime: float
+    target: str
+    skip_patterns: list[str]
+
+    def to_list(self) -> list:
+        """转为 JSON 兼容的列表格式"""
+        return [self.mtime, self.target, self.skip_patterns]
+
+    @staticmethod
+    def from_list(data: list) -> "BackupEntry":
+        """从 JSON 兼容的列表格式创建"""
+        return BackupEntry(mtime=data[0], target=data[1], skip_patterns=data[2])
 
 
 class BackupManager:
     """
     管理备份策略的类，封装状态和读写操作
     """
-    def __init__(self, data_file: str = "./sbackup.json"):
-        self.data_file: str = data_file
-        self.data: dict = {}
+    def __init__(self, data_file: str = ""):
+        self.data_file: str = data_file or get_default_data_file()
+        self.data: dict[str, list] = {}
         self.load()
 
     def load(self):
@@ -31,6 +51,18 @@ class BackupManager:
                     self.data = json.load(f)
             except json.JSONDecodeError:
                 print(t("warn.json.decode.error", path=self.data_file))
+                # 备份损坏文件，避免数据丢失
+                backup_path = self.data_file + ".bak"
+                try:
+                    shutil.copy2(self.data_file, backup_path)
+                    print(t("warn.json.backup", path=backup_path))
+                except OSError:
+                    # 备份失败时重命名损坏文件，避免下次再次触发
+                    try:
+                        os.rename(self.data_file, self.data_file + ".corrupted")
+                        print(t("warn.json.renamed", path=self.data_file + ".corrupted"))
+                    except OSError:
+                        pass
                 self.data = {}
 
     def save(self, initial: bool = False):
@@ -39,14 +71,24 @@ class BackupManager:
         """
         if not initial:
             logger.debug(f"写入数据文件: {self.data_file}")
-        
+
         data_dir = os.path.dirname(self.data_file)
         if data_dir:
             os.makedirs(data_dir, exist_ok=True)
-            
+
         with open(self.data_file, "w", encoding="utf-8") as f:
             json.dump(self.data, f, ensure_ascii=False, indent=4)
 
+    def _get_entry(self, key: str) -> BackupEntry | None:
+        """获取指定路径的备份策略条目"""
+        raw = self.data.get(key)
+        if raw is None:
+            return None
+        return BackupEntry.from_list(raw)
+
+    def _set_entry(self, key: str, entry: BackupEntry):
+        """设置指定路径的备份策略条目"""
+        self.data[key] = entry.to_list()
 
     def add_folder(
         self,
@@ -58,9 +100,9 @@ class BackupManager:
         添加备份策略
         """
         if skip_patterns is None:
-            skip_patterns = ".git,__pycache__"
-        skip_list = skip_patterns.split(",") if skip_patterns else []
-        
+            skip_patterns = ",".join(DEFAULT_SKIP_PATTERNS)
+        skip_list = [s.strip() for s in skip_patterns.split(",") if s.strip()] if skip_patterns else []
+
         if not os.path.isdir(folder_path):
             print(t("err.folder.invalid", path=folder_path))
             return False
@@ -72,15 +114,19 @@ class BackupManager:
         if abs_path in self.data:
             print(t("info.already.added", path=abs_path))
             return False
-            
-        self.data[abs_path] = [
-            os.stat(abs_path).st_mtime,
-            os.path.abspath(target_folder),
-            skip_list,
-        ]
+
+        try:
+            entry = BackupEntry(
+                mtime=os.stat(abs_path).st_mtime,
+                target=os.path.abspath(target_folder),
+                skip_patterns=skip_list,
+            )
+        except OSError as e:
+            print(t("err.os", error=e))
+            return False
+        self._set_entry(abs_path, entry)
         self.save()
         return True
-
 
     def rm_folder(self, folder_path: str) -> bool:
         """
@@ -95,33 +141,63 @@ class BackupManager:
             print(t("warn.no.strategy.found", path=abs_path))
             return False
 
-
-    def save_folder(self):
+    def execute_backups(self):
         """
-        备份所有文件夹
+        执行所有备份策略
         """
         config = load_config()
-        for key, value in list(self.data.items()):
+        backup_count = 0
+        skip_count = 0
+        for key, raw in list(self.data.items()):
             if not os.path.exists(key):
                 print(t("warn.source.missing", path=key))
                 continue
-            if value[0] != os.stat(key).st_mtime:
-                # 使用配置文件中的默认值，但允许覆盖特定项
+            try:
+                current_mtime = os.stat(key).st_mtime
+            except OSError as e:
+                print(t("err.os", error=e))
+                continue
+            entry = BackupEntry.from_list(raw)
+            if entry.mtime != current_mtime:
                 config_instance = Config(
                     folder_path=key,
-                    zipfile_path=value[1],
-                    skip_patterns=value[2],
+                    zipfile_path=entry.target,
+                    skip_patterns=entry.skip_patterns,
                     compression_algorithm=config.compression_algorithm,
                     compression_level=config.compression_level
                 )
-                ZipfileCompression(config_instance).zip_folder()
+                result = ZipfileCompression(config_instance).zip_folder()
+                if result["success"]:
+                    entry.mtime = current_mtime
+                    self._set_entry(key, entry)
+                    backup_count += 1
+            else:
+                skip_count += 1
+        if backup_count > 0:
+            self.save()
+            print(t("cmd.save.completed", count=backup_count))
+        elif skip_count > 0:
+            print(t("cmd.save.uptodate"))
 
+    # 向后兼容别名
+    save_folder = execute_backups
 
     def all_folder(self) -> dict[str, str]:
         """
         查看所有备份策略
         """
-        return {key: value[1] for key, value in self.data.items()}
+        return {key: BackupEntry.from_list(raw).target for key, raw in self.data.items()}
+
+    @staticmethod
+    def _display_width(s: str) -> int:
+        """计算字符串的终端显示宽度（中文字符算2，英文字符算1）"""
+        width = 0
+        for ch in s:
+            if ord(ch) > 0x2E80:
+                width += 2
+            else:
+                width += 1
+        return width
 
     def list_folder_table(self) -> str:
         """
@@ -129,29 +205,27 @@ class BackupManager:
         """
         if not self.data:
             return t("cmd.all.empty")
-        
+
         headers = [t("table.header.source"), t("table.header.dest"), t("table.header.ignore")]
         rows = []
-        for path, info in self.data.items():
-            # 格式化忽略模式
-            skip = ", ".join(info[2]) if info[2] else t("table.cell.none")
-            rows.append([path, info[1], skip])
-        
-        # 计算列宽
-        col_widths = [len(h) for h in headers]
+        for path, raw in self.data.items():
+            entry = BackupEntry.from_list(raw)
+            skip = ", ".join(entry.skip_patterns) if entry.skip_patterns else t("table.cell.none")
+            rows.append([path, entry.target, skip])
+
+        col_widths = [self._display_width(h) for h in headers]
         for row in rows:
             for i, cell in enumerate(row):
-                col_widths[i] = max(col_widths[i], len(cell))
-        
-        # 构建表格
+                col_widths[i] = max(col_widths[i], self._display_width(cell))
+
         fmt = " | ".join(["{:<" + str(w) + "}" for w in col_widths])
         sep = "-+-".join(["-" * w for w in col_widths])
-        
+
         lines = []
         lines.append(fmt.format(*headers))
         lines.append(sep)
         for row in rows:
             lines.append(fmt.format(*row))
-            
+
         return "\n".join(lines)
   

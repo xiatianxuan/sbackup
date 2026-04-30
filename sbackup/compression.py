@@ -1,73 +1,18 @@
 """
-@Time: 2025.12.20
-@Author: codeseed
+压缩模块：ZIP 文件压缩逻辑
 """
 
 import os
-import json
 import zipfile
 from pathlib import Path
 from fnmatch import fnmatch
-from dataclasses import dataclass, field
 from tqdm import tqdm
 from sbackup.i18n import t
+from sbackup.config import Config
 
-DEFAULT_SKIP_PATTERNS = [".git", "__pycache__"]
+# compresslevel 仅对 ZIP_DEFLATED 和 ZIP_BZIP2 有效
+_VALID_COMPRESSLEVEL_ALGORITHMS = {zipfile.ZIP_DEFLATED, zipfile.ZIP_BZIP2}
 
-
-@dataclass
-class Config:
-    folder_path: str = "."
-    zipfile_path: str | None = None
-    skip_patterns: list[str] = field(default_factory=lambda: list(DEFAULT_SKIP_PATTERNS))
-    compression_format: str = "ZIP"
-    compression_algorithm: str = "ZIP_DEFLATED"
-    compression_level: int = 6
-    lang: str = "en_US"
-
-def load_config(config_file: str = "config.json") -> Config:
-    """
-    从配置文件中加载配置
-    """
-    if not os.path.exists(config_file):
-        return Config()
-
-    with open(config_file, "r", encoding="utf-8") as f:
-        config_data = json.load(f)
-
-    compression_config = config_data.get("compression", {})
-    skip_patterns = config_data.get("skip_patterns", DEFAULT_SKIP_PATTERNS)
-    data_file = config_data.get("data_file", "sbackup.json")
-    lang = config_data.get("lang", "en_US")
-
-    return Config(
-        folder_path="",
-        zipfile_path=None,
-        skip_patterns=skip_patterns,
-        compression_format="ZIP",
-        compression_algorithm=compression_config.get("algorithm", "ZIP_DEFLATED"),
-        compression_level=compression_config.get("level", 6),
-        lang=lang
-    )
-
-def save_lang(lang: str, config_file: str = "config.json") -> None:
-    """
-    将语言偏好保存到配置文件
-    """
-    if os.path.exists(config_file):
-        with open(config_file, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    else:
-        data = {}
-    
-    data["lang"] = lang
-    
-    data_dir = os.path.dirname(config_file)
-    if data_dir:
-        os.makedirs(data_dir, exist_ok=True)
-        
-    with open(config_file, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=4)
 
 class ZipfileCompression:
     def __init__(self, config: Config) -> None:
@@ -75,7 +20,9 @@ class ZipfileCompression:
         self.zipfile_path: Path | None = Path(config.zipfile_path) if config.zipfile_path else None
         self.skip_patterns: list[str] = config.skip_patterns
         self.compression_algorithm: int = self._choose_compression_algorithm(config.compression_algorithm)
-        self.compression_level: int = config.compression_level
+        self.compression_level: int | None = self._validate_compresslevel(
+            config.compression_level, self.compression_algorithm
+        )
 
     @staticmethod
     def _choose_compression_algorithm(compression_algorithm: str) -> int:
@@ -91,11 +38,40 @@ class ZipfileCompression:
             case _:
                 return zipfile.ZIP_DEFLATED
 
+    @staticmethod
+    def _validate_compresslevel(level: int, algorithm: int) -> int | None:
+        """校验 compresslevel：仅对 ZIP_DEFLATED 和 ZIP_BZIP2 有效，其他算法不传递该参数"""
+        if algorithm not in _VALID_COMPRESSLEVEL_ALGORITHMS:
+            return None  # zipfile 不接受 compresslevel 时传 None
+        if not (0 <= level <= 9):
+            print(t("warn.invalid.compresslevel", level=level))
+            return 6
+        return level
+
     def _should_ignore(self, name: str) -> bool:
         for pattern in self.skip_patterns:
             if fnmatch(name, pattern):
                 return True
         return False
+
+    def _collect_files(self, folder_path: Path) -> list[tuple[str, str]]:
+        """遍历文件夹收集需要压缩的文件列表，处理权限错误"""
+        files = []
+        try:
+            for dirpath, dirnames, filenames in os.walk(folder_path):
+                try:
+                    dirnames[:] = [d for d in dirnames if not self._should_ignore(d)]
+                    for filename in filenames:
+                        if not self._should_ignore(filename):
+                            files.append((dirpath, filename))
+                except PermissionError as e:
+                    print(t("err.permission", path=dirpath))
+                    continue
+        except PermissionError as e:
+            print(t("err.permission", path=folder_path))
+        except OSError as e:
+            print(t("err.os", error=e))
+        return files
 
     def zip_folder(self) -> dict:
         """
@@ -116,32 +92,40 @@ class ZipfileCompression:
             elif zipfile_path.suffix.lower() != ".zip":
                 zipfile_path = zipfile_path.with_name(zipfile_path.name + ".zip")
 
-        # 1. 预先遍历，收集所有需要压缩的文件
-        files_to_compress = []
-        for dirpath, dirnames, filenames in os.walk(folder_path):
-            dirnames[:] = [d for d in dirnames if not self._should_ignore(d)]
-            for filename in filenames:
-                if not self._should_ignore(filename):
-                    files_to_compress.append((dirpath, filename))
-        
+        # ZIP 文件已存在时提示覆盖
+        if zipfile_path.exists():
+            print(t("warn.zip.overwrite", path=zipfile_path))
+
+        # 1. 收集需要压缩的文件（带异常保护）
+        files_to_compress = self._collect_files(folder_path)
         total_files = len(files_to_compress)
         files_count = 0
 
         try:
-            with zipfile.ZipFile(zipfile_path, "w", self.compression_algorithm, compresslevel=self.compression_level) as zipf:
+            zip_kwargs = {"mode": "w", "compression": self.compression_algorithm}
+            if self.compression_level is not None:
+                zip_kwargs["compresslevel"] = self.compression_level
+
+            with zipfile.ZipFile(zipfile_path, **zip_kwargs) as zipf:
                 # 2. 使用 tqdm 显示进度条
                 with tqdm(total=total_files, desc=t("compress.progress"), unit=t("compress.unit")) as pbar:
                     for dirpath, filename in files_to_compress:
                         file_path = Path(dirpath) / filename
-                        arcname = folder_path.parent / file_path.relative_to(folder_path)
-                        zipf.write(file_path, arcname)
-                        pbar.update(1)
-                        files_count += 1
+                        arcname = str(folder_path.name / file_path.relative_to(folder_path)).replace("\\", "/")
+                        try:
+                            zipf.write(file_path, arcname)
+                            pbar.update(1)
+                            files_count += 1
+                        except (FileNotFoundError, PermissionError):
+                            # 文件在遍历后被删除或权限变更，跳过单个文件
+                            continue
 
             size_mb = zipfile_path.stat().st_size / (1024 * 1024)
             # tqdm 清理输出后打印最终结果
             print(t("compress.success", path=zipfile_path, size=size_mb, count=files_count))
             return {"success": True, "files_count": files_count, "size_mb": size_mb}
+        except KeyboardInterrupt:
+            raise
         except PermissionError:
             print(t("err.permission", path=zipfile_path))
             return {"success": False, "files_count": 0, "size_mb": 0.0}

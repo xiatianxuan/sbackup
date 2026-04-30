@@ -4,32 +4,10 @@ import argparse
 import logging
 from sbackup.auto_save import BackupManager
 from sbackup.i18n import set_locale, t
-from sbackup._compression import load_config, save_lang
+from sbackup.config import load_config, save_lang
 
 VERSION = "1.0.0"
 logger = logging.getLogger(__name__)
-
-def detect_lang() -> str:
-    """
-    优先从命令行参数检测语言，其次从配置文件，最后使用默认英语
-    """
-    # 1. 检查命令行参数
-    for i, arg in enumerate(sys.argv):
-        if arg == '--lang' and i + 1 < len(sys.argv):
-            return sys.argv[i + 1]
-        if arg.startswith('--lang='):
-            return arg.split('=', 1)[1]
-            
-    # 2. 检查配置文件
-    try:
-        config = load_config()
-        if config.lang:
-            return config.lang
-    except Exception:
-        pass
-        
-    # 3. 默认语言
-    return "en_US"
 
 EXAMPLES = """示例:
   添加备份策略:
@@ -70,7 +48,7 @@ Sbackup 帮助您轻松管理多文件夹的备份任务。它采用增量备份
     # 全局参数
     parser.add_argument("--debug", action="store_true", help="开启调试模式，输出详细的运行日志和状态信息")
     parser.add_argument("-h", "--help", action="help", help="显示此帮助信息并退出")
-    parser.add_argument("--lang", default=argparse.SUPPRESS, help="设置界面语言: zh_CN (默认) 或 en_US")
+    parser.add_argument("--lang", default=None, help="设置界面语言: zh_CN (默认) 或 en_US")
     
     subparsers = parser.add_subparsers(dest="command", help="选择要执行的命令")
 
@@ -103,15 +81,18 @@ def parse_path(path_str: str) -> str:
     return os.path.expanduser(path_str.strip())
 
 
-def run() -> None:
+def run() -> int:
+    """
+    主运行函数，返回退出码：0 成功，1 失败
+    """
     parser = get_parser()
     args = parser.parse_args()
 
     # 加载配置以获取默认语言设置
     config = load_config()
-    
+
     # 检查是否显式提供了 --lang 参数
-    if hasattr(args, 'lang'):
+    if args.lang is not None:
         current_lang = args.lang
         # 持久化语言设置
         save_lang(current_lang)
@@ -131,16 +112,16 @@ def run() -> None:
 
     if args.command is None:
         parser.print_help()
-        return
+        return 0
 
     if args.command == "version":
         print(f"""
 Sbackup v{VERSION} — Copyright © 2026 xiatianxuan
 Licensed under GNU GPL v3.0 — https://www.gnu.org/licenses/gpl-3.0.html
 """)
-        return
+        return 0
 
-    manager = BackupManager()
+    manager = BackupManager(data_file=config.data_file)
 
     if args.command == "add":
         source = parse_path(args.source)
@@ -148,12 +129,18 @@ Licensed under GNU GPL v3.0 — https://www.gnu.org/licenses/gpl-3.0.html
         success = manager.add_folder(source, dest, args.ignore)
         if success:
             print(t("cmd.add.success", source=source, dest=dest))
+            return 0
+        return 1
     elif args.command in ("rm", "remove"):
         path = parse_path(args.path)
         success = manager.rm_folder(path)
         if success:
             print(t("cmd.rm.success", path=path))
+            return 0
+        return 1
     elif args.command == "all":
         print(manager.list_folder_table())
+        return 0
     elif args.command == "save":
-        manager.save_folder()
+        manager.execute_backups()
+        return 0

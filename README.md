@@ -73,21 +73,32 @@ sbackup <command>
 #### 添加备份策略
 
 ```bash
-sbackup add
+sbackup add <source> <dest> [-i ignore_patterns]
 ```
 
-运行后，程序会提示你输入：
-- **备份文件夹**：需要备份的文件夹路径
-- **目标文件夹**：备份文件存放的目标路径
-- **需要忽略的文件夹或文件**：用逗号分隔，例如 `.git,__pycache__,node_modules`
+参数说明：
+- **source**：需要备份的源文件夹路径
+- **dest**：备份文件存放的目标路径
+- **-i, --ignore**：需要忽略的文件或文件夹名称，使用逗号分隔（默认：`.git,__pycache__`）
+
+示例：
+```bash
+sbackup add F:/my_folder F:/backup -i node_modules,.git
+```
 
 #### 删除备份策略
 
 ```bash
-sbackup rm
+sbackup rm <path>
 ```
 
-运行后，程序会提示你输入需要删除备份策略的目标文件夹路径。
+参数说明：
+- **path**：需要删除备份策略的源文件夹路径
+
+示例：
+```bash
+sbackup rm F:/my_folder
+```
 
 #### 查看所有备份策略
 
@@ -184,13 +195,18 @@ python -m unittest discover -s tests -t .
 sbackup/
 ├── main.py              # 程序入口
 ├── sbackup/
-│   ├── __init__.py      # 主模块，处理命令行参数
-│   ├── _compression.py  # 压缩功能实现
-│   └── auto_save.py     # 备份策略管理
+│   ├── __init__.py      # CLI 参数解析和命令分发
+│   ├── __main__.py      # python -m sbackup 入口
+│   ├── config.py        # 配置加载、语言持久化、数据路径
+│   ├── compression.py   # ZIP 压缩功能实现
+│   ├── auto_save.py     # 备份策略管理
+│   └── i18n.py          # 国际化支持
 ├── tests/
 │   └── sbackup/
 │       ├── test_auto_save.py   # 备份策略测试
 │       ├── test_compression.py # 压缩功能测试
+│       ├── test_config.py      # 配置加载测试
+│       ├── test_i18n.py        # 国际化测试
 │       └── test_main.py        # 主模块测试
 ├── config.json          # 配置文件
 └── README.md            # 文档

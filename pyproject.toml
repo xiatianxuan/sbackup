@@ -3,7 +3,7 @@ name = "sbackup"
 version = "1.0.0"
 description = "智能文件夹备份工具，支持增量备份和自定义配置"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.10"
 license = {text = "GPL-3.0"}
 authors = [
     {name = "xiatianxuan", email = "xiatianxuan2025@163.com"}
