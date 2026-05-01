@@ -19,3 +19,4 @@ sbackup.json
 
 .qwen
 memory
+.coverage

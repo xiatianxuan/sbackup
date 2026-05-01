@@ -6,7 +6,8 @@ import unittest
 import os
 import tempfile
 import json
-from sbackup.config import load_config, save_lang, Config
+from unittest.mock import patch
+from sbackup.config import load_config, save_lang, save_format
 
 
 class TestConfig(unittest.TestCase):
@@ -25,6 +26,7 @@ class TestConfig(unittest.TestCase):
         # 清理临时目录
         if os.path.exists(self.test_dir):
             import shutil
+
             shutil.rmtree(self.test_dir)
 
     def test_load_config_from_file(self):
@@ -33,12 +35,9 @@ class TestConfig(unittest.TestCase):
         """
         # 创建配置文件
         config_data = {
-            "compression": {
-                "algorithm": "ZIP_STORED",
-                "level": 1
-            },
+            "compression": {"algorithm": "ZIP_STORED", "level": 1},
             "skip_patterns": [".git", "__pycache__", ".DS_Store"],
-            "data_file": "custom_sbackup.json"
+            "data_file": "custom_sbackup.json",
         }
         with open(self.config_file, "w", encoding="utf-8") as f:
             json.dump(config_data, f, ensure_ascii=False, indent=4)
@@ -58,12 +57,9 @@ class TestConfig(unittest.TestCase):
         # 在临时目录中创建默认配置文件（而非项目根目录）
         default_config = os.path.join(self.test_dir, "config.json")
         config_data = {
-            "compression": {
-                "algorithm": "ZIP_DEFLATED",
-                "level": 6
-            },
+            "compression": {"algorithm": "ZIP_DEFLATED", "level": 6},
             "skip_patterns": [".git", "__pycache__"],
-            "data_file": "sbackup.json"
+            "data_file": "sbackup.json",
         }
         with open(default_config, "w", encoding="utf-8") as f:
             json.dump(config_data, f, ensure_ascii=False, indent=4)
@@ -105,6 +101,7 @@ class TestSaveLang(unittest.TestCase):
     def tearDown(self):
         if os.path.exists(self.test_dir):
             import shutil
+
             shutil.rmtree(self.test_dir)
 
     def test_save_lang_creates_new_file(self):
@@ -151,6 +148,80 @@ class TestSaveLang(unittest.TestCase):
         with open(subdir_config, "r", encoding="utf-8") as f:
             data = json.load(f)
         self.assertEqual(data["lang"], "zh_CN")
+
+    def test_save_lang_malformed_existing_file(self):
+        """测试已有配置文件 JSON 损坏时 save_lang 重置"""
+        with open(self.config_file, "w") as f:
+            f.write("{bad json!!!")
+        save_lang("en_US", self.config_file)
+        with open(self.config_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        self.assertEqual(data["lang"], "en_US")
+
+    @patch("os.makedirs")
+    def test_save_lang_makedirs_error(self, mock_makedirs):
+        """测试创建目录失败时 save_lang 静默返回"""
+        mock_makedirs.side_effect = OSError("permission denied")
+        save_lang("zh_CN", self.config_file)
+        # 不应抛出异常
+
+    @patch("builtins.open")
+    def test_save_lang_write_error(self, mock_open):
+        """测试写入文件失败时 save_lang 静默处理"""
+        mock_open.side_effect = OSError("disk full")
+        save_lang("zh_CN", self.config_file)
+        # 不应抛出异常
+
+
+class TestSaveFormat(unittest.TestCase):
+    def setUp(self):
+        self.test_dir = tempfile.mkdtemp()
+        self.config_file = os.path.join(self.test_dir, "config.json")
+
+    def tearDown(self):
+        if os.path.exists(self.test_dir):
+            import shutil
+
+            shutil.rmtree(self.test_dir)
+
+    def test_save_format_creates_new_file(self):
+        """测试 save_format 创建新配置文件"""
+        save_format("tar.gz", self.config_file)
+        self.assertTrue(os.path.exists(self.config_file))
+        with open(self.config_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        self.assertEqual(data["compression_format"], "tar.gz")
+
+    def test_save_format_updates_existing(self):
+        """测试 save_format 更新已有配置"""
+        with open(self.config_file, "w", encoding="utf-8") as f:
+            json.dump({"lang": "zh_CN"}, f)
+        save_format("tar.xz", self.config_file)
+        with open(self.config_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        self.assertEqual(data["compression_format"], "tar.xz")
+        self.assertEqual(data["lang"], "zh_CN")
+
+    def test_save_format_malformed_json(self):
+        """测试配置文件损坏时 save_format 重置"""
+        with open(self.config_file, "w") as f:
+            f.write("{bad")
+        save_format("tar.bz2", self.config_file)
+        with open(self.config_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        self.assertEqual(data["compression_format"], "tar.bz2")
+
+    @patch("os.makedirs")
+    def test_save_format_makedirs_error(self, mock_makedirs):
+        """测试创建目录失败"""
+        mock_makedirs.side_effect = OSError("denied")
+        save_format("tar.gz", self.config_file)
+
+    @patch("builtins.open")
+    def test_save_format_write_error(self, mock_open):
+        """测试写入失败"""
+        mock_open.side_effect = OSError("disk full")
+        save_format("tar.gz", self.config_file)
 
 
 if __name__ == "__main__":

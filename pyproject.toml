@@ -18,7 +18,9 @@ classifiers = [
     "Topic :: System :: Archiving :: Backup",
 ]
 dependencies = [
+    "py7zr>=1.1.0",
     "tqdm>=4.67.3",
+    "zstandard>=0.25.0",
 ]
 
 [project.scripts]
@@ -27,3 +29,8 @@ sbackup = "sbackup:run"
 [project.urls]
 Homepage = "https://gitee.com/xiatianxuan"
 Repository = "https://gitee.com/xiatianxuan/sbackup"
+
+[dependency-groups]
+dev = [
+    "coverage>=7.13.5",
+]

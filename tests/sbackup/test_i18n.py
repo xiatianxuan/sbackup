@@ -68,6 +68,54 @@ class TestI18n(unittest.TestCase):
         en_text = i18n.t("cmd.all.empty")
         self.assertEqual(en_text, "No backup strategies configured.")
 
+    def test_set_locale_corrupted_file_fallback(self):
+        """测试语言包 JSON 损坏时回退到默认中文"""
+        import shutil
+
+        # 创建临时损坏的语言文件
+        tmpdir = tempfile.mkdtemp()
+        try:
+            locales_dir = os.path.join(tmpdir, "locales")
+            os.makedirs(locales_dir)
+            # 创建损坏的 en_US.json
+            with open(os.path.join(locales_dir, "en_US.json"), "w") as f:
+                f.write("{corrupted!!!")
+            # 创建正常的 zh_CN.json 作为回退
+            with open(
+                os.path.join(locales_dir, "zh_CN.json"), "w", encoding="utf-8"
+            ) as f:
+                json.dump({"test.key": "回退文本"}, f, ensure_ascii=False)
+
+            # 使用 patch 模拟
+            with unittest.mock.patch.object(
+                i18n.os.path, "dirname", return_value=tmpdir
+            ):
+                i18n.set_locale("en_US")
+                self.assertEqual(i18n.t("test.key"), "回退文本")
+        finally:
+            shutil.rmtree(tmpdir)
+
+    def test_set_locale_both_corrupted(self):
+        """测试所有语言包都损坏时 translations 为空"""
+        import shutil
+
+        tmpdir = tempfile.mkdtemp()
+        try:
+            locales_dir = os.path.join(tmpdir, "locales")
+            os.makedirs(locales_dir)
+            with open(os.path.join(locales_dir, "en_US.json"), "w") as f:
+                f.write("{bad")
+            with open(os.path.join(locales_dir, "zh_CN.json"), "w") as f:
+                f.write("{bad")
+
+            with unittest.mock.patch.object(
+                i18n.os.path, "dirname", return_value=tmpdir
+            ):
+                i18n.set_locale("en_US")
+                self.assertEqual(i18n._translations, {})
+        finally:
+            shutil.rmtree(tmpdir)
+
 
 if __name__ == "__main__":
     unittest.main()

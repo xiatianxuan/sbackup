@@ -14,7 +14,8 @@ if os.path.exists(_default_file):
         with open(_default_file, "r", encoding="utf-8") as f:
             _translations = json.load(f)
     except (json.JSONDecodeError, OSError) as e:
-        logger.warning("无法加载默认语言包 %s: %s", _default_file, e)
+        logger.warning("i18n.load.default_failed %s: %s", _default_file, e)
+
 
 def set_locale(lang: str) -> None:
     """
@@ -29,7 +30,7 @@ def set_locale(lang: str) -> None:
                 _translations = json.load(f)
             return
         except (json.JSONDecodeError, OSError) as e:
-            logger.warning("无法加载语言包 %s: %s", locale_file, e)
+            logger.warning(t("log.i18n.load.failed", path=locale_file, error=e))
 
     # 回退到默认中文
     default_file = os.path.join(os.path.dirname(__file__), "locales", "zh_CN.json")
@@ -38,8 +39,11 @@ def set_locale(lang: str) -> None:
             with open(default_file, "r", encoding="utf-8") as f:
                 _translations = json.load(f)
         except (json.JSONDecodeError, OSError) as e:
-            logger.warning("无法加载回退语言包 %s: %s", default_file, e)
+            logger.warning(
+                t("log.i18n.load.fallback_failed", path=default_file, error=e)
+            )
             _translations = {}
+
 
 def t(key: str, **kwargs) -> str:
     """

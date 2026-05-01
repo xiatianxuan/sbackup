@@ -1,113 +1,145 @@
-import sys
 import os
+import sys
 import argparse
 import logging
+from typing import NoReturn
 from sbackup.auto_save import BackupManager
 from sbackup.i18n import set_locale, t
-from sbackup.config import load_config, save_lang
+from sbackup.config import load_config, save_lang, save_format
+from sbackup.compression import restore_backup
 
 VERSION = "1.0.0"
 logger = logging.getLogger(__name__)
 
-EXAMPLES = """示例:
-  添加备份策略:
-    sbackup add F:/my_folder F:/backup -i node_modules,.git
-    
-  删除备份策略:
-    sbackup rm F:/my_folder
-    
-  查看所有策略:
-    sbackup all
-    
-  执行备份任务:
-    sbackup save
-    
-  使用英文界面:
-    sbackup --lang en_US save
-"""
+
+class LocalizedArgumentParser(argparse.ArgumentParser):
+    """本地化错误输出的 ArgumentParser 子类"""
+
+    def error(self, message: str) -> NoReturn:
+        # 将 argparse 生成的英文错误关键词替换为本地化文本
+        localized = message
+        localized = localized.replace(
+            "invalid choice: ", t("err.argparse.invalid_choice")
+        )
+        localized = localized.replace("choose from", t("err.argparse.choose_from"))
+        localized = localized.replace(
+            "invalid float value: ", t("err.argparse.invalid_float")
+        )
+        localized = localized.replace(
+            "invalid int value: ", t("err.argparse.invalid_int")
+        )
+        localized = localized.replace(
+            "unrecognized arguments: ", t("err.argparse.unrecognized_args")
+        )
+        localized = localized.replace("required", t("err.argparse.required"))
+        self.print_usage(sys.stderr)
+        sys.stderr.write(f"{self.prog}: {localized}\n")
+        sys.exit(2)
+
+
+def _detect_lang_from_argv() -> str | None:
+    """从 sys.argv 中提取 --lang 参数值"""
+    for i, arg in enumerate(sys.argv):
+        if arg == "--lang" and i + 1 < len(sys.argv):
+            return sys.argv[i + 1]
+        if arg.startswith("--lang="):
+            return arg.split("=", 1)[1]
+    return None
+
 
 def get_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+    parser = LocalizedArgumentParser(
         prog="sbackup",
-        description=f"""Sbackup v{VERSION} — 轻量级增量备份工具
-
-Sbackup 帮助您轻松管理多文件夹的备份任务。它采用增量备份策略，
-仅对已修改的文件进行压缩，支持自定义忽略规则，并提供直观的进度反馈。
-
-可用命令:
-  add     添加新的备份策略 (源目录 -> 目标目录)
-  rm      删除现有的备份策略
-  all     显示所有已配置的备份策略详情
-  save    根据策略执行备份任务
-  version 查看版本信息""",
-        epilog=EXAMPLES,
+        description=t("cli.description", version=VERSION),
+        epilog=t("cli.epilog"),
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        add_help=False
+        add_help=False,
     )
 
-    # 全局参数
-    parser.add_argument("--debug", action="store_true", help="开启调试模式，输出详细的运行日志和状态信息")
-    parser.add_argument("-h", "--help", action="help", help="显示此帮助信息并退出")
-    parser.add_argument("--lang", default=None, help="设置界面语言: zh_CN (默认) 或 en_US")
-    
-    subparsers = parser.add_subparsers(dest="command", help="选择要执行的命令")
+    parser.add_argument("--debug", action="store_true", help=t("cli.help.debug"))
+    parser.add_argument("-h", "--help", action="help", help=t("cli.help.help"))
+    parser.add_argument("--lang", default=None, help=t("cli.help.lang"))
+    parser.add_argument(
+        "--format",
+        default=None,
+        choices=["zip", "tar", "tar.gz", "tar.bz2", "tar.xz", "tar.zst", "7z"],
+        help=t("cli.help.format"),
+    )
 
-    # add command
-    add_parser = subparsers.add_parser("add", help="添加新的备份策略")
-    add_parser.add_argument("source", help="源文件夹路径: 需要被备份的目录")
-    add_parser.add_argument("dest", help="目标文件夹路径: 存放生成的 .zip 备份文件的目录")
-    add_parser.add_argument("-i", "--ignore", default=".git,__pycache__", help="需要忽略的文件或文件夹名称 (使用逗号分隔，默认: .git,__pycache__)")
+    subparsers = parser.add_subparsers(dest="command", help=t("cli.help.subcommands"))
 
-    # rm command
-    rm_parser = subparsers.add_parser("rm", aliases=["remove"], help="删除备份策略")
-    rm_parser.add_argument("path", help="需要删除备份策略的源文件夹路径")
+    add_parser = subparsers.add_parser("add", help=t("cli.help.add"))
+    add_parser.add_argument("source", help=t("cli.help.add.source"))
+    add_parser.add_argument("dest", help=t("cli.help.add.dest"))
+    add_parser.add_argument(
+        "-i", "--ignore", default=".git,__pycache__", help=t("cli.help.add.ignore")
+    )
+    add_parser.add_argument(
+        "--format",
+        default=None,
+        choices=["zip", "tar", "tar.gz", "tar.bz2", "tar.xz", "tar.zst", "7z"],
+        help=t("cli.help.add.format"),
+    )
 
-    # all command
-    subparsers.add_parser("all", help="查看所有备份策略")
+    rm_parser = subparsers.add_parser("rm", aliases=["remove"], help=t("cli.help.rm"))
+    rm_parser.add_argument("path", help=t("cli.help.rm.path"))
 
-    # save command
-    subparsers.add_parser("save", help="执行所有备份策略")
+    subparsers.add_parser("all", help=t("cli.help.all"))
 
-    # version command
-    subparsers.add_parser("version", help="查看版本信息")
+    save_parser = subparsers.add_parser("save", help=t("cli.help.save"))
+    save_parser.add_argument(
+        "--keep", type=int, default=0, help=t("cli.help.save.keep")
+    )
+    save_parser.add_argument("--password", default="", help=t("cli.help.save.password"))
+
+    watch_parser = subparsers.add_parser("watch", help=t("cli.help.watch"))
+    watch_parser.add_argument(
+        "--interval", type=float, default=60, help=t("cli.help.watch.interval")
+    )
+    watch_parser.add_argument(
+        "--keep", type=int, default=0, help=t("cli.help.watch.keep")
+    )
+    watch_parser.add_argument(
+        "--password", default="", help=t("cli.help.watch.password")
+    )
+
+    restore_parser = subparsers.add_parser("restore", help=t("cli.help.restore"))
+    restore_parser.add_argument("backup_file", help=t("cli.help.restore.file"))
+    restore_parser.add_argument("target_dir", help=t("cli.help.restore.dir"))
+
+    subparsers.add_parser("version", help=t("cli.help.version"))
 
     return parser
 
 
 def parse_path(path_str: str) -> str:
-    """
-    清理并解析路径
-    """
     return os.path.expanduser(path_str.strip())
 
 
 def run() -> int:
-    """
-    主运行函数，返回退出码：0 成功，1 失败
-    """
+    # 先检测 --lang 参数，初始化语言环境，再创建本地化 parser
+    lang_from_argv = _detect_lang_from_argv()
+    config = load_config()
+    current_lang = lang_from_argv if lang_from_argv is not None else config.lang
+    set_locale(current_lang)
+
     parser = get_parser()
     args = parser.parse_args()
 
-    # 加载配置以获取默认语言设置
-    config = load_config()
+    # 持久化语言设置
+    if lang_from_argv is not None:
+        save_lang(lang_from_argv)
 
-    # 检查是否显式提供了 --lang 参数
-    if args.lang is not None:
-        current_lang = args.lang
-        # 持久化语言设置
-        save_lang(current_lang)
-    else:
-        current_lang = config.lang
+    # 持久化格式设置
+    if args.format is not None:
+        save_format(args.format)
+        config.compression_format = args.format.upper().replace(".", "_")
 
-    # 初始化语言环境
-    set_locale(current_lang)
-
-    # 配置日志：仅在有 --debug 参数时开启
     if args.debug:
         logging.basicConfig(
             level=logging.DEBUG,
             format="%(asctime)s [%(levelname)s] %(message)s",
-            datefmt="%H:%M:%S"
+            datefmt="%H:%M:%S",
         )
 
     if args.command is None:
@@ -115,10 +147,7 @@ def run() -> int:
         return 0
 
     if args.command == "version":
-        print(f"""
-Sbackup v{VERSION} — Copyright © 2026 xiatianxuan
-Licensed under GNU GPL v3.0 — https://www.gnu.org/licenses/gpl-3.0.html
-""")
+        print(t("cli.version", version=VERSION))
         return 0
 
     manager = BackupManager(data_file=config.data_file)
@@ -126,7 +155,9 @@ Licensed under GNU GPL v3.0 — https://www.gnu.org/licenses/gpl-3.0.html
     if args.command == "add":
         source = parse_path(args.source)
         dest = parse_path(args.dest)
-        success = manager.add_folder(source, dest, args.ignore)
+        # 条目级格式：用户在 add 时指定的 --format 仅作用于该条目
+        entry_fmt = args.format.upper().replace(".", "_") if args.format else ""
+        success = manager.add_folder(source, dest, args.ignore, entry_fmt)
         if success:
             print(t("cmd.add.success", source=source, dest=dest))
             return 0
@@ -142,5 +173,21 @@ Licensed under GNU GPL v3.0 — https://www.gnu.org/licenses/gpl-3.0.html
         print(manager.list_folder_table())
         return 0
     elif args.command == "save":
-        manager.execute_backups()
+        manager.execute_backups(keep=args.keep, password=args.password)
         return 0
+    elif args.command == "watch":
+        import time as _time
+
+        interval_sec = args.interval * 60
+        print(t("cmd.watch.start", interval=args.interval))
+        try:
+            while True:
+                manager.execute_backups(keep=args.keep, password=args.password)
+                _time.sleep(interval_sec)
+        except KeyboardInterrupt:
+            return 0
+    elif args.command == "restore":
+        result = restore_backup(args.backup_file, args.target_dir)
+        return 0 if result["success"] else 1
+
+    return 0
