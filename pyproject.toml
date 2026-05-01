@@ -1,7 +1,36 @@
 [project]
 name = "sbackup"
-version = "0.1.0"
-description = "Add your description here"
+version = "1.0.0"
+description = "智能文件夹备份工具，支持增量备份和自定义配置"
 readme = "README.md"
-requires-python = ">=3.12"
-dependencies = []
+requires-python = ">=3.10"
+license = {text = "GPL-3.0"}
+authors = [
+    {name = "xiatianxuan", email = "xiatianxuan2025@163.com"}
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: System :: Archiving :: Backup",
+]
+dependencies = [
+    "py7zr>=1.1.0",
+    "tqdm>=4.67.3",
+    "zstandard>=0.25.0",
+]
+
+[project.scripts]
+sbackup = "sbackup:run"
+
+[project.urls]
+Homepage = "https://gitee.com/xiatianxuan"
+Repository = "https://gitee.com/xiatianxuan/sbackup"
+
+[dependency-groups]
+dev = [
+    "coverage>=7.13.5",
+]

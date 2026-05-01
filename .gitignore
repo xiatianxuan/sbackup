@@ -16,3 +16,7 @@ sbackup.json
 
 # Virtual environments
 .venv
+
+.qwen
+memory
+.coverage
