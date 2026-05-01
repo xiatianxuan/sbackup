@@ -1,5 +1,6 @@
 import json
 import os
+import sys
 import logging
 
 logger = logging.getLogger(__name__)
@@ -7,8 +8,19 @@ logger = logging.getLogger(__name__)
 _current_locale = "zh_CN"
 _translations = {}
 
+
+def _get_locales_dir() -> str:
+    """获取 locales 目录路径（兼容正常 Python 和 Nuitka/PyInstaller 打包）"""
+    if getattr(sys, "frozen", False):
+        # Nuitka/PyInstaller 打包后，资源在可执行文件同级目录
+        base_dir = os.path.dirname(sys.executable)
+        return os.path.join(base_dir, "sbackup", "locales")
+    # 正常 Python 环境
+    return os.path.join(os.path.dirname(__file__), "locales")
+
+
 # 初始化默认语言包
-_default_file = os.path.join(os.path.dirname(__file__), "locales", "zh_CN.json")
+_default_file = os.path.join(_get_locales_dir(), "zh_CN.json")
 if os.path.exists(_default_file):
     try:
         with open(_default_file, "r", encoding="utf-8") as f:
@@ -23,7 +35,7 @@ def set_locale(lang: str) -> None:
     """
     global _current_locale, _translations
     _current_locale = lang
-    locale_file = os.path.join(os.path.dirname(__file__), "locales", f"{lang}.json")
+    locale_file = os.path.join(_get_locales_dir(), f"{lang}.json")
     if os.path.exists(locale_file):
         try:
             with open(locale_file, "r", encoding="utf-8") as f:
@@ -33,7 +45,7 @@ def set_locale(lang: str) -> None:
             logger.warning(t("log.i18n.load.failed", path=locale_file, error=e))
 
     # 回退到默认中文
-    default_file = os.path.join(os.path.dirname(__file__), "locales", "zh_CN.json")
+    default_file = os.path.join(_get_locales_dir(), "zh_CN.json")
     if os.path.exists(default_file):
         try:
             with open(default_file, "r", encoding="utf-8") as f:

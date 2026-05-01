@@ -53,7 +53,7 @@ uv pip install sbackup
 #### 从源码安装
 
 ```bash
-git clone https://gitee.com/xiatianxuan/sbackup.git
+git clone https://gitub.com/xiatianxuan/sbackup.git
 cd sbackup
 uv sync
 ```
