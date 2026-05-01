@@ -34,3 +34,10 @@ Repository = "https://gitee.com/xiatianxuan/sbackup"
 dev = [
     "coverage>=7.13.5",
 ]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["sbackup*"]
+
+[tool.setuptools.package-data]
+sbackup = ["locales/*.json"]

@@ -42,7 +42,7 @@ jobs:
       - name: Build executable
         run: |
           python -m nuitka `
-            --standalone --onefile `
+            --onefile `
             --output-filename=sbackup.exe `
             --include-package=sbackup `
             --include-data-dir=sbackup/locales=sbackup/locales `
