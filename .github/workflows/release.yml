@@ -2,8 +2,8 @@ name: Release
 
 on:
   push:
-    branches:
-      - main
+    tags:
+      - 'v*'
 
 permissions:
   contents: write
@@ -43,6 +43,7 @@ jobs:
         run: |
           python -m nuitka `
             --onefile `
+            --assume-yes-for-downloads `
             --output-filename=sbackup.exe `
             --include-package=sbackup `
             --include-data-dir=sbackup/locales=sbackup/locales `
@@ -72,7 +73,8 @@ jobs:
       - name: Build executable
         run: |
           python -m nuitka \
-            --standalone --onefile \
+            --onefile \
+            --assume-yes-for-downloads \
             --output-filename=sbackup-macos \
             --include-package=sbackup \
             --include-data-dir=sbackup/locales=sbackup/locales \
@@ -102,7 +104,8 @@ jobs:
       - name: Build executable
         run: |
           python -m nuitka \
-            --standalone --onefile \
+            --onefile \
+            --assume-yes-for-downloads \
             --output-filename=sbackup-linux \
             --include-package=sbackup \
             --include-data-dir=sbackup/locales=sbackup/locales \
