@@ -1,0 +1,117 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  # 发布 PyPI 包（sbackup-cli）
+  publish-pypi:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "latest"
+
+      - name: Build
+        run: uv build
+
+      - name: Publish to PyPI
+        run: uv publish --token ${{ secrets.PYPI_TOKEN }}
+
+  # 构建 Windows 可执行文件
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install nuitka py7zr tqdm zstandard
+
+      - name: Build executable
+        run: |
+          python -m nuitka `
+            --standalone --onefile `
+            --output-filename=sbackup.exe `
+            --include-package=sbackup `
+            --include-data-dir=sbackup/locales=sbackup/locales `
+            --include-package=py7zr `
+            --include-package=tqdm `
+            --include-package=zstandard `
+            main.py
+
+      - name: Upload to Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: sbackup.exe
+
+  # 构建 macOS 可执行文件
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install nuitka py7zr tqdm zstandard
+
+      - name: Build executable
+        run: |
+          python -m nuitka \
+            --standalone --onefile \
+            --output-filename=sbackup-macos \
+            --include-package=sbackup \
+            --include-data-dir=sbackup/locales=sbackup/locales \
+            --include-package=py7zr \
+            --include-package=tqdm \
+            --include-package=zstandard \
+            main.py
+
+      - name: Upload to Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: sbackup-macos
+
+  # 构建 Linux 可执行文件
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install nuitka py7zr tqdm zstandard
+
+      - name: Build executable
+        run: |
+          python -m nuitka \
+            --standalone --onefile \
+            --output-filename=sbackup-linux \
+            --include-package=sbackup \
+            --include-data-dir=sbackup/locales=sbackup/locales \
+            --include-package=py7zr \
+            --include-package=tqdm \
+            --include-package=zstandard \
+            main.py
+
+      - name: Upload to Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: sbackup-linux
