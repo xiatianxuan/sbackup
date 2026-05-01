@@ -1,5 +1,5 @@
 [project]
-name = "sbackup"
+name = "sbackup-cli"
 version = "1.0.0"
 description = "智能文件夹备份工具，支持增量备份和自定义配置"
 readme = "README.md"

@@ -699,7 +699,7 @@ wheels = [
 ]
 
 [[package]]
-name = "sbackup"
+name = "sbackup-cli"
 version = "1.0.0"
 source = { virtual = "." }
 dependencies = [
