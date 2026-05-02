@@ -162,15 +162,24 @@ class BackupManager:
             print(t("warn.no.strategy.found", path=abs_path))
             return False
 
-    def execute_backups(self, keep: int = 0, password: str = ""):
+    def execute_backups(
+        self,
+        keep: int = 0,
+        password: str = "",
+        sftp_upload: bool = False,
+        webdav_upload: bool = False,
+    ):
         """
         执行所有备份策略
         :param keep: 保留最近 N 个备份文件，0 表示不清理
         :param password: 加密密码（仅 7z 格式支持）
+        :param sftp_upload: 是否在备份后上传到 SFTP 服务器
+        :param webdav_upload: 是否在备份后上传到 WebDAV 服务器
         """
         config = load_config()
         backup_count = 0
         skip_count = 0
+        uploaded_files = []
         for key, raw in list(self.data.items()):
             if key == "_history":
                 continue
@@ -203,6 +212,8 @@ class BackupManager:
                     if keep > 0:
                         self._cleanup_old_backups(entry.target, keep)
                     backup_count += 1
+                    if sftp_upload and result.get("path"):
+                        uploaded_files.append(result["path"])
             else:
                 skip_count += 1
         if backup_count > 0:
@@ -211,8 +222,142 @@ class BackupManager:
         elif skip_count > 0:
             print(t("cmd.save.uptodate"))
 
+        # SFTP 上传
+        if sftp_upload and uploaded_files:
+            self._upload_to_sftp(uploaded_files, config)
+
+        # WebDAV 上传
+        if webdav_upload and uploaded_files:
+            self._upload_to_webdav(uploaded_files, config)
+
     # 向后兼容别名
     save_folder = execute_backups
+
+    @staticmethod
+    def _upload_to_sftp(file_paths: list[str], config: Config) -> None:
+        """将备份文件上传到 SFTP 服务器"""
+        from sbackup.sftp import SFTPClient, SFTPError
+
+        if not config.sftp_enabled or not config.sftp_host:
+            print(t("err.sftp.not_configured"))
+            return
+
+        # 获取认证凭据：优先使用配置中的私钥，否则尝试默认私钥
+        key_file = config.sftp_key_file
+        key_passphrase = config.sftp_key_passphrase
+        password = config.sftp_password
+
+        if not key_file and not password:
+            default_key = SFTPClient.try_default_key()
+            if default_key:
+                print(t("cmd.sftp.using_default_key", path=default_key))
+                key_file = default_key
+                # 尝试加载私钥检测是否需要密码短语
+                try:
+                    SFTPClient._load_private_key(key_file, "")
+                except SFTPError:
+                    # 需要密码短语，提示用户输入
+                    import getpass
+
+                    while True:
+                        passphrase = getpass.getpass(
+                            t("cli.prompt.sftp.key_passphrase") + " "
+                        )
+                        if not passphrase:
+                            print(t("cmd.sftp.no_default_key"))
+                            return
+                        try:
+                            SFTPClient._load_private_key(key_file, passphrase)
+                            key_passphrase = passphrase
+                            break
+                        except SFTPError:
+                            print(t("err.sftp.wrong_passphrase"))
+            else:
+                print(t("cmd.sftp.no_default_key"))
+                return
+        elif key_file and not key_passphrase and not password:
+            # 已配置私钥但未设置密码短语，检测是否需要
+            import getpass
+
+            try:
+                SFTPClient._load_private_key(key_file, "")
+            except SFTPError:
+                while True:
+                    passphrase = getpass.getpass(
+                        t("cli.prompt.sftp.key_passphrase") + " "
+                    )
+                    if not passphrase:
+                        print(t("cmd.sftp.no_default_key"))
+                        return
+                    try:
+                        SFTPClient._load_private_key(key_file, passphrase)
+                        key_passphrase = passphrase
+                        break
+                    except SFTPError:
+                        print(t("err.sftp.wrong_passphrase"))
+
+        try:
+            with SFTPClient(
+                config.sftp_host,
+                config.sftp_port,
+                config.sftp_user,
+                password,
+                key_file,
+                key_passphrase,
+            ) as client:
+                for local_path in file_paths:
+                    filename = os.path.basename(local_path)
+                    file_size = os.path.getsize(local_path)
+                    print(t("cmd.sftp.uploading", file=filename))
+                    try:
+                        from tqdm import tqdm as tqdm_cls
+
+                        with tqdm_cls(
+                            total=file_size,
+                            unit="B",
+                            unit_scale=True,
+                            desc=t("cmd.sftp.progress"),
+                        ) as pbar:
+                            client.upload_file(
+                                local_path,
+                                config.sftp_remote_path,
+                                progress_callback=lambda sent, total: pbar.update(
+                                    sent - pbar.n
+                                ),
+                            )
+                        print(t("cmd.sftp.success", file=filename))
+                    except SFTPError as e:
+                        print(str(e))
+        except SFTPError as e:
+            print(str(e))
+
+    @staticmethod
+    def _upload_to_webdav(file_paths: list[str], config: Config) -> None:
+        """将备份文件上传到 WebDAV 服务器"""
+        from sbackup.webdav import WebDAVClient, WebDAVError
+
+        if not config.webdav_enabled or not config.webdav_url:
+            print(t("err.webdav.not_configured"))
+            return
+
+        try:
+            client = WebDAVClient(
+                config.webdav_url,
+                config.webdav_user,
+                config.webdav_password,
+            )
+            client.connect()
+            for local_path in file_paths:
+                filename = os.path.basename(local_path)
+                print(t("cmd.webdav.uploading", file=filename))
+                try:
+                    remote_path = config.webdav_remote_path.rstrip("/") + "/" + filename
+                    client.upload_file(local_path, remote_path)
+                    print(t("cmd.webdav.success", file=filename))
+                except WebDAVError as e:
+                    print(str(e))
+        except WebDAVError as e:
+            print(str(e))
 
     def _add_history(self, source: str, size_mb: float, files_count: int):
         """记录备份历史"""

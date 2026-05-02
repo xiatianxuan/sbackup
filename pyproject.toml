@@ -18,6 +18,7 @@ classifiers = [
     "Topic :: System :: Archiving :: Backup",
 ]
 dependencies = [
+    "paramiko>=4.0.0",
     "py7zr>=1.1.0",
     "tqdm>=4.67.3",
     "zstandard>=0.25.0",

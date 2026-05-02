@@ -1,4 +1,14 @@
 {
     "lang": "zh_CN",
-    "compression_format": "zip"
+    "compression_format": "zip",
+    "sftp": {
+        "host": "47.239.13.50",
+        "port": 22,
+        "user": "root",
+        "password": "",
+        "key_file": "C:\\Users\\lenovo/.ssh/id_ed25519",
+        "key_passphrase": "",
+        "remote_path": "/root/backups",
+        "enabled": true
+    }
 }

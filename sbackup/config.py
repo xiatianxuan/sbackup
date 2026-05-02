@@ -38,6 +38,21 @@ class Config:
     lang: str = "zh_CN"
     data_file: str = field(default_factory=get_default_data_file)
     password: str = ""
+    # SFTP 配置
+    sftp_host: str = ""
+    sftp_port: int = 22
+    sftp_user: str = ""
+    sftp_password: str = ""
+    sftp_key_file: str = ""
+    sftp_key_passphrase: str = ""
+    sftp_remote_path: str = "/"
+    sftp_enabled: bool = False
+    # WebDAV 配置
+    webdav_url: str = ""
+    webdav_user: str = ""
+    webdav_password: str = ""
+    webdav_remote_path: str = "/"
+    webdav_enabled: bool = False
 
 
 def load_config(config_file: str = "config.json") -> Config:
@@ -59,6 +74,8 @@ def load_config(config_file: str = "config.json") -> Config:
     data_file = config_data.get("data_file", get_default_data_file())
     lang = config_data.get("lang", "en_US")
     compression_format = config_data.get("compression_format", "ZIP")
+    sftp_config = config_data.get("sftp", {})
+    webdav_config = config_data.get("webdav", {})
 
     return Config(
         folder_path="",
@@ -69,6 +86,19 @@ def load_config(config_file: str = "config.json") -> Config:
         compression_level=compression_config.get("level", 6),
         lang=lang,
         data_file=data_file,
+        sftp_host=sftp_config.get("host", ""),
+        sftp_port=sftp_config.get("port", 22),
+        sftp_user=sftp_config.get("user", ""),
+        sftp_password=sftp_config.get("password", ""),
+        sftp_key_file=sftp_config.get("key_file", ""),
+        sftp_key_passphrase=sftp_config.get("key_passphrase", ""),
+        sftp_remote_path=sftp_config.get("remote_path", "/"),
+        sftp_enabled=sftp_config.get("enabled", False),
+        webdav_url=webdav_config.get("url", ""),
+        webdav_user=webdav_config.get("user", ""),
+        webdav_password=webdav_config.get("password", ""),
+        webdav_remote_path=webdav_config.get("remote_path", "/"),
+        webdav_enabled=webdav_config.get("enabled", False),
     )
 
 
@@ -118,6 +148,98 @@ def save_format(fmt: str, config_file: str = "config.json") -> None:
         data = {}
 
     data["compression_format"] = fmt
+
+    data_dir = os.path.dirname(config_file)
+    if data_dir:
+        try:
+            os.makedirs(data_dir, exist_ok=True)
+        except OSError as e:
+            logger.error(t("log.config.mkdir.error"), data_dir, e)
+            return
+
+    try:
+        with open(config_file, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=4)
+    except OSError as e:
+        logger.error(t("log.config.write.error"), config_file, e)
+
+
+def save_sftp_config(
+    host: str,
+    port: int,
+    user: str,
+    password: str,
+    remote_path: str,
+    enabled: bool = True,
+    key_file: str = "",
+    key_passphrase: str = "",
+    config_file: str = "config.json",
+) -> None:
+    """
+    将 SFTP 配置保存到配置文件
+    """
+    if os.path.exists(config_file):
+        try:
+            with open(config_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except json.JSONDecodeError:
+            logger.warning(t("log.config.reset"), config_file)
+            data = {}
+    else:
+        data = {}
+
+    data["sftp"] = {
+        "host": host,
+        "port": port,
+        "user": user,
+        "password": password,
+        "key_file": key_file,
+        "key_passphrase": key_passphrase,
+        "remote_path": remote_path,
+        "enabled": enabled,
+    }
+
+    data_dir = os.path.dirname(config_file)
+    if data_dir:
+        try:
+            os.makedirs(data_dir, exist_ok=True)
+        except OSError as e:
+            logger.error(t("log.config.mkdir.error"), data_dir, e)
+            return
+
+    try:
+        with open(config_file, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=4)
+    except OSError as e:
+        logger.error(t("log.config.write.error"), config_file, e)
+
+
+def save_webdav_config(
+    url: str,
+    user: str,
+    password: str,
+    remote_path: str = "/",
+    enabled: bool = True,
+    config_file: str = "config.json",
+) -> None:
+    """将 WebDAV 配置保存到配置文件"""
+    if os.path.exists(config_file):
+        try:
+            with open(config_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except json.JSONDecodeError:
+            logger.warning(t("log.config.reset"), config_file)
+            data = {}
+    else:
+        data = {}
+
+    data["webdav"] = {
+        "url": url,
+        "user": user,
+        "password": password,
+        "remote_path": remote_path,
+        "enabled": enabled,
+    }
 
     data_dir = os.path.dirname(config_file)
     if data_dir:

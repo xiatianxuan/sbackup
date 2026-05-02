@@ -175,7 +175,12 @@ class ZipfileCompression(BaseCompressor):
                     count=files_count,
                 )
             )
-            return {"success": True, "files_count": files_count, "size_mb": size_mb}
+            return {
+                "success": True,
+                "files_count": files_count,
+                "size_mb": size_mb,
+                "path": str(zipfile_path),
+            }
         except KeyboardInterrupt:
             raise
         except PermissionError:
@@ -268,7 +273,12 @@ class TarfileCompression(BaseCompressor):
                     count=files_count,
                 )
             )
-            return {"success": True, "files_count": files_count, "size_mb": size_mb}
+            return {
+                "success": True,
+                "files_count": files_count,
+                "size_mb": size_mb,
+                "path": str(tarfile_path),
+            }
         except KeyboardInterrupt:
             raise
         except PermissionError:
@@ -351,7 +361,12 @@ class ZstdCompression(BaseCompressor):
             print(
                 t("compress.success", path=output_path, size=size_mb, count=files_count)
             )
-            return {"success": True, "files_count": files_count, "size_mb": size_mb}
+            return {
+                "success": True,
+                "files_count": files_count,
+                "size_mb": size_mb,
+                "path": str(output_path),
+            }
         except KeyboardInterrupt:
             raise
         except PermissionError:
@@ -433,7 +448,12 @@ class SevenZipCompression(BaseCompressor):
             print(
                 t("compress.success", path=output_path, size=size_mb, count=files_count)
             )
-            return {"success": True, "files_count": files_count, "size_mb": size_mb}
+            return {
+                "success": True,
+                "files_count": files_count,
+                "size_mb": size_mb,
+                "path": str(output_path),
+            }
         except KeyboardInterrupt:
             raise
         except PermissionError:

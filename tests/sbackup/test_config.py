@@ -7,7 +7,7 @@ import os
 import tempfile
 import json
 from unittest.mock import patch
-from sbackup.config import load_config, save_lang, save_format
+from sbackup.config import load_config, save_lang, save_format, save_sftp_config
 
 
 class TestConfig(unittest.TestCase):
@@ -222,6 +222,178 @@ class TestSaveFormat(unittest.TestCase):
         """测试写入失败"""
         mock_open.side_effect = OSError("disk full")
         save_format("tar.gz", self.config_file)
+
+
+class TestSaveSftpConfig(unittest.TestCase):
+    def setUp(self):
+        self.test_dir = tempfile.mkdtemp()
+        self.config_file = os.path.join(self.test_dir, "config.json")
+
+    def tearDown(self):
+        if os.path.exists(self.test_dir):
+            import shutil
+
+            shutil.rmtree(self.test_dir)
+
+    def test_save_sftp_config_creates_new_file(self):
+        """测试 save_sftp_config 创建新配置文件"""
+        save_sftp_config(
+            "host.com",
+            2222,
+            "admin",
+            "secret",
+            "/backups",
+            key_file="/path/to/key",
+            key_passphrase="keypass",
+            config_file=self.config_file,
+        )
+        self.assertTrue(os.path.exists(self.config_file))
+        with open(self.config_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        self.assertEqual(data["sftp"]["host"], "host.com")
+        self.assertEqual(data["sftp"]["port"], 2222)
+        self.assertEqual(data["sftp"]["user"], "admin")
+        self.assertEqual(data["sftp"]["password"], "secret")
+        self.assertEqual(data["sftp"]["key_file"], "/path/to/key")
+        self.assertEqual(data["sftp"]["key_passphrase"], "keypass")
+        self.assertEqual(data["sftp"]["remote_path"], "/backups")
+        self.assertTrue(data["sftp"]["enabled"])
+
+    def test_save_sftp_config_updates_existing(self):
+        """测试 save_sftp_config 更新已有配置"""
+        with open(self.config_file, "w", encoding="utf-8") as f:
+            json.dump({"lang": "zh_CN", "compression_format": "zip"}, f)
+        save_sftp_config(
+            "newhost",
+            22,
+            "user",
+            "pass",
+            "/",
+            key_file="",
+            key_passphrase="",
+            config_file=self.config_file,
+        )
+        with open(self.config_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        self.assertEqual(data["sftp"]["host"], "newhost")
+        self.assertEqual(data["lang"], "zh_CN")
+        self.assertEqual(data["compression_format"], "zip")
+
+    def test_save_sftp_config_disabled(self):
+        """测试 save_sftp_config 禁用 SFTP"""
+        save_sftp_config(
+            "host",
+            22,
+            "user",
+            "pass",
+            "/",
+            enabled=False,
+            key_file="",
+            key_passphrase="",
+            config_file=self.config_file,
+        )
+        with open(self.config_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        self.assertFalse(data["sftp"]["enabled"])
+
+    def test_save_sftp_config_malformed_json(self):
+        """测试配置文件损坏时 save_sftp_config 重置"""
+        with open(self.config_file, "w") as f:
+            f.write("{bad")
+        save_sftp_config(
+            "host",
+            22,
+            "user",
+            "pass",
+            "/",
+            key_file="",
+            key_passphrase="",
+            config_file=self.config_file,
+        )
+        with open(self.config_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        self.assertEqual(data["sftp"]["host"], "host")
+
+    @patch("os.makedirs")
+    def test_save_sftp_config_makedirs_error(self, mock_makedirs):
+        """测试创建目录失败"""
+        mock_makedirs.side_effect = OSError("denied")
+        save_sftp_config(
+            "host",
+            22,
+            "user",
+            "pass",
+            "/",
+            key_file="",
+            key_passphrase="",
+            config_file=self.config_file,
+        )
+
+    @patch("builtins.open")
+    def test_save_sftp_config_write_error(self, mock_open):
+        """测试写入失败"""
+        mock_open.side_effect = OSError("disk full")
+        save_sftp_config("host", 22, "user", "pass", "/", config_file=self.config_file)
+
+    def test_load_config_with_sftp(self):
+        """测试 load_config 读取 SFTP 配置"""
+        config_data = {
+            "lang": "en_US",
+            "sftp": {
+                "host": "sftp.example.com",
+                "port": 2222,
+                "user": "backup",
+                "password": "s3cret",
+                "remote_path": "/data/backups",
+                "enabled": True,
+            },
+        }
+        with open(self.config_file, "w", encoding="utf-8") as f:
+            json.dump(config_data, f)
+        config = load_config(self.config_file)
+        self.assertEqual(config.sftp_host, "sftp.example.com")
+        self.assertEqual(config.sftp_port, 2222)
+        self.assertEqual(config.sftp_user, "backup")
+        self.assertEqual(config.sftp_password, "s3cret")
+        self.assertEqual(config.sftp_remote_path, "/data/backups")
+        self.assertTrue(config.sftp_enabled)
+
+    def test_load_config_sftp_defaults(self):
+        """测试 load_config 无 SFTP 配置时使用默认值"""
+        config_data = {"lang": "en_US"}
+        with open(self.config_file, "w", encoding="utf-8") as f:
+            json.dump(config_data, f)
+        config = load_config(self.config_file)
+        self.assertEqual(config.sftp_host, "")
+        self.assertEqual(config.sftp_port, 22)
+        self.assertEqual(config.sftp_user, "")
+        self.assertEqual(config.sftp_password, "")
+        self.assertEqual(config.sftp_remote_path, "/")
+        self.assertFalse(config.sftp_enabled)
+
+    def test_load_config_with_sftp_key(self):
+        """测试加载包含私钥的 SFTP 配置"""
+        config_data = {
+            "sftp": {
+                "host": "keyhost",
+                "port": 2222,
+                "user": "keyuser",
+                "password": "",
+                "key_file": "/home/user/.ssh/id_rsa",
+                "key_passphrase": "keypass",
+                "remote_path": "/backups",
+                "enabled": True,
+            }
+        }
+        with open(self.config_file, "w", encoding="utf-8") as f:
+            json.dump(config_data, f)
+        config = load_config(self.config_file)
+        self.assertEqual(config.sftp_host, "keyhost")
+        self.assertEqual(config.sftp_port, 2222)
+        self.assertEqual(config.sftp_user, "keyuser")
+        self.assertEqual(config.sftp_key_file, "/home/user/.ssh/id_rsa")
+        self.assertEqual(config.sftp_key_passphrase, "keypass")
+        self.assertTrue(config.sftp_enabled)
 
 
 if __name__ == "__main__":

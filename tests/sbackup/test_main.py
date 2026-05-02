@@ -9,7 +9,7 @@ import json
 import logging
 import tempfile
 import shutil
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 from sbackup.i18n import t
 
 
@@ -258,6 +258,210 @@ class TestMain(unittest.TestCase):
             self.assertIn("无效的浮点数值", stderr_output)
         finally:
             sys.stderr = old_stderr
+
+    @patch("builtins.print")
+    def test_save_with_sftp_flag(self, mock_print):
+        """测试 save --sftp 参数传递"""
+        os.chdir(self.test_dir)
+        sys.argv = ["sbackup", "--lang", "en_US", "save", "--sftp"]
+        from sbackup import run
+        from sbackup.auto_save import BackupManager
+
+        original_execute = BackupManager.execute_backups
+
+        def mock_execute(
+            self, keep=0, password="", sftp_upload=False, webdav_upload=False
+        ):
+            self._sftp_called = sftp_upload
+
+        BackupManager.execute_backups = mock_execute
+        try:
+            result = run()
+            self.assertEqual(result, 0)
+        finally:
+            BackupManager.execute_backups = original_execute
+
+    @patch("builtins.print")
+    def test_sftp_test_not_configured(self, mock_print):
+        """测试 sftp test 未配置时报错"""
+        os.chdir(self.test_dir)
+        sys.argv = ["sbackup", "--lang", "en_US", "sftp", "test"]
+        from sbackup import run
+
+        result = run()
+        self.assertEqual(result, 1)
+        printed = " ".join(str(call) for call in mock_print.call_args_list)
+        self.assertIn("not configured", printed)
+
+    @patch("builtins.print")
+    @patch("builtins.input")
+    @patch("getpass.getpass")
+    @patch("sbackup.sftp.SFTPClient.try_default_key", return_value=None)
+    def test_sftp_config_interactive(
+        self, mock_try_key, mock_getpass, mock_input, mock_print
+    ):
+        """测试 sftp config 交互式配置"""
+        mock_input.side_effect = [
+            "testhost",
+            "2222",
+            "admin",
+            "",  # key_file (空，使用密码)
+            "/backups",
+        ]
+        mock_getpass.side_effect = [
+            "secret",  # password
+        ]
+        os.chdir(self.test_dir)
+        sys.argv = ["sbackup", "--lang", "en_US", "sftp", "config"]
+        from sbackup import run
+
+        result = run()
+        self.assertEqual(result, 0)
+        printed = " ".join(str(call) for call in mock_print.call_args_list)
+        self.assertIn("saved", printed)
+
+    @patch("builtins.print")
+    def test_sftp_config_with_args(self, mock_print):
+        """测试 sftp config 通过命令行参数配置"""
+        os.chdir(self.test_dir)
+        sys.argv = [
+            "sbackup",
+            "--lang",
+            "en_US",
+            "sftp",
+            "config",
+            "--host",
+            "myhost",
+            "--port",
+            "2222",
+            "--user",
+            "admin",
+            "--password",
+            "secret",
+            "--key-file",
+            "/path/to/id_rsa",
+            "--key-passphrase",
+            "keypass",
+            "--remote-path",
+            "/backups",
+        ]
+        from sbackup import run
+
+        result = run()
+        self.assertEqual(result, 0)
+        printed = " ".join(str(call) for call in mock_print.call_args_list)
+        self.assertIn("saved", printed)
+
+    @patch("builtins.print")
+    def test_sftp_test_with_config(self, mock_print):
+        """测试 sftp test 连接成功"""
+        os.chdir(self.test_dir)
+        # 先配置 SFTP
+        from sbackup.config import save_sftp_config
+
+        save_sftp_config(
+            "testhost",
+            22,
+            "user",
+            "pass",
+            "/",
+            key_file="/path/to/key",
+            key_passphrase="keypass",
+            config_file=os.path.join(self.test_dir, "config.json"),
+        )
+
+        sys.argv = ["sbackup", "--lang", "en_US", "sftp", "test"]
+        from sbackup import run
+        from sbackup.sftp import SFTPClient
+
+        original_connect = SFTPClient.connect
+
+        def mock_connect(self):
+            pass
+
+        SFTPClient.connect = mock_connect
+        try:
+            result = run()
+            self.assertEqual(result, 0)
+        finally:
+            SFTPClient.connect = original_connect
+
+    @patch("builtins.print")
+    @patch("getpass.getpass")
+    def test_sftp_test_with_key_no_passphrase(self, mock_getpass, mock_print):
+        """测试 sftp test 已配置私钥但无密码短语"""
+        os.chdir(self.test_dir)
+        from sbackup.config import save_sftp_config
+
+        save_sftp_config(
+            "testhost",
+            22,
+            "user",
+            "",
+            "/",
+            key_file="/path/to/key",
+            key_passphrase="",
+            config_file=os.path.join(self.test_dir, "config.json"),
+        )
+
+        sys.argv = ["sbackup", "--lang", "en_US", "sftp", "test"]
+        from sbackup import run
+        from sbackup.sftp import SFTPClient, SFTPError
+
+        # 模拟私钥需要密码短语，用户直接回车放弃
+        mock_getpass.side_effect = [""]
+
+        original_load = SFTPClient._load_private_key
+
+        def mock_load(key_file, passphrase):
+            if passphrase == "":
+                raise SFTPError("needs passphrase")
+            return MagicMock()
+
+        SFTPClient._load_private_key = staticmethod(mock_load)
+        try:
+            result = run()
+            self.assertEqual(result, 1)
+        finally:
+            SFTPClient._load_private_key = staticmethod(original_load)
+
+    @patch("builtins.print")
+    @patch("builtins.input")
+    @patch("getpass.getpass")
+    @patch("sbackup.sftp.SFTPClient.try_default_key")
+    def test_sftp_config_auto_key_needs_passphrase(
+        self, mock_try_key, mock_getpass, mock_input, mock_print
+    ):
+        """测试 sftp config 自动检测私钥需密码短语"""
+        mock_try_key.return_value = "/home/user/.ssh/id_ed25519"
+        mock_input.side_effect = [
+            "testhost",
+            "2222",
+            "admin",
+            "",  # key_file 为空，触发自动检测
+            "/backups",  # remote_path
+        ]
+        # 自动检测到私钥后进入 if 分支，getpass 被调用一次后返回 None
+        # 然后回退到密码认证，getpass 再被调用一次
+        mock_getpass.side_effect = ["", "correct_passphrase"]
+        os.chdir(self.test_dir)
+        sys.argv = ["sbackup", "--lang", "en_US", "sftp", "config"]
+        from sbackup import run
+        from sbackup.sftp import SFTPClient, SFTPError
+
+        original_load = SFTPClient._load_private_key
+
+        def mock_load(key_file, passphrase):
+            if passphrase == "":
+                raise SFTPError("needs passphrase")
+            return MagicMock()
+
+        SFTPClient._load_private_key = staticmethod(mock_load)
+        try:
+            result = run()
+            self.assertEqual(result, 0)
+        finally:
+            SFTPClient._load_private_key = staticmethod(original_load)
 
 
 if __name__ == "__main__":
