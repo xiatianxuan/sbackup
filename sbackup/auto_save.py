@@ -2,6 +2,7 @@ import os
 import json
 import shutil
 import logging
+import unicodedata
 from pathlib import Path
 from dataclasses import dataclass
 from sbackup.config import (
@@ -14,6 +15,8 @@ from sbackup.compression import create_compressor
 from sbackup.i18n import t
 
 logger = logging.getLogger(__name__)
+
+_HISTORY_KEY = "_history"
 
 
 @dataclass
@@ -32,6 +35,8 @@ class BackupEntry:
     @staticmethod
     def from_list(data: list) -> "BackupEntry":
         """从 JSON 兼容的列表格式创建（向后兼容旧格式）"""
+        if not isinstance(data, list) or len(data) < 3:
+            return BackupEntry(mtime=0.0, target="", skip_patterns=[])
         fmt = data[3] if len(data) > 3 else ""
         return BackupEntry(
             mtime=data[0], target=data[1], skip_patterns=data[2], compression_format=fmt
@@ -131,6 +136,10 @@ class BackupManager:
             return False
 
         abs_path = os.path.abspath(folder_path)
+        abs_dest = os.path.abspath(target_folder)
+        if abs_path == abs_dest:
+            print(t("err.dest.invalid", path=target_folder))
+            return False
         if abs_path in self.data:
             print(t("info.already.added", path=abs_path))
             return False
@@ -181,7 +190,7 @@ class BackupManager:
         skip_count = 0
         uploaded_files = []
         for key, raw in list(self.data.items()):
-            if key == "_history":
+            if key == _HISTORY_KEY:
                 continue
             if not os.path.exists(key):
                 print(t("warn.source.missing", path=key))
@@ -234,6 +243,28 @@ class BackupManager:
     save_folder = execute_backups
 
     @staticmethod
+    def _resolve_key_passphrase(key_file: str, SFTPClient, SFTPError) -> str | None:
+        """
+        检测私钥是否需要密码短语，需要时交互式提示输入
+        :return: 密码短语（空字符串表示不需要），None 表示用户放弃
+        """
+        try:
+            SFTPClient._load_private_key(key_file, "")
+            return ""
+        except SFTPError:
+            import getpass
+
+            while True:
+                passphrase = getpass.getpass(t("cli.prompt.sftp.key_passphrase") + " ")
+                if not passphrase:
+                    return None
+                try:
+                    SFTPClient._load_private_key(key_file, passphrase)
+                    return passphrase
+                except SFTPError:
+                    print(t("err.sftp.wrong_passphrase"))
+
+    @staticmethod
     def _upload_to_sftp(file_paths: list[str], config: Config) -> None:
         """将备份文件上传到 SFTP 服务器"""
         from sbackup.sftp import SFTPClient, SFTPError
@@ -252,49 +283,24 @@ class BackupManager:
             if default_key:
                 print(t("cmd.sftp.using_default_key", path=default_key))
                 key_file = default_key
-                # 尝试加载私钥检测是否需要密码短语
-                try:
-                    SFTPClient._load_private_key(key_file, "")
-                except SFTPError:
-                    # 需要密码短语，提示用户输入
-                    import getpass
-
-                    while True:
-                        passphrase = getpass.getpass(
-                            t("cli.prompt.sftp.key_passphrase") + " "
-                        )
-                        if not passphrase:
-                            print(t("cmd.sftp.no_default_key"))
-                            return
-                        try:
-                            SFTPClient._load_private_key(key_file, passphrase)
-                            key_passphrase = passphrase
-                            break
-                        except SFTPError:
-                            print(t("err.sftp.wrong_passphrase"))
+                key_passphrase = BackupManager._resolve_key_passphrase(
+                    default_key, SFTPClient, SFTPError
+                )
+                if key_passphrase is None:
+                    key_file = ""
+                    password = config.sftp_password
+                    key_passphrase = ""
             else:
                 print(t("cmd.sftp.no_default_key"))
                 return
         elif key_file and not key_passphrase and not password:
-            # 已配置私钥但未设置密码短语，检测是否需要
-            import getpass
-
-            try:
-                SFTPClient._load_private_key(key_file, "")
-            except SFTPError:
-                while True:
-                    passphrase = getpass.getpass(
-                        t("cli.prompt.sftp.key_passphrase") + " "
-                    )
-                    if not passphrase:
-                        print(t("cmd.sftp.no_default_key"))
-                        return
-                    try:
-                        SFTPClient._load_private_key(key_file, passphrase)
-                        key_passphrase = passphrase
-                        break
-                    except SFTPError:
-                        print(t("err.sftp.wrong_passphrase"))
+            key_passphrase = BackupManager._resolve_key_passphrase(
+                key_file, SFTPClient, SFTPError
+            )
+            if key_passphrase is None:
+                key_file = ""
+                password = config.sftp_password
+                key_passphrase = ""
 
         try:
             with SFTPClient(
@@ -363,7 +369,7 @@ class BackupManager:
         """记录备份历史"""
         from datetime import datetime
 
-        history = self.data.setdefault("_history", [])
+        history = self.data.setdefault(_HISTORY_KEY, [])
         history.append(
             {
                 "time": datetime.now().isoformat(timespec="seconds"),
@@ -374,11 +380,47 @@ class BackupManager:
         )
         # 保留最近 100 条记录
         if len(history) > 100:
-            self.data["_history"] = history[-100:]
+            self.data[_HISTORY_KEY] = history[-100:]
 
     def get_history(self) -> list[dict]:
         """获取备份历史记录"""
-        return self.data.get("_history", [])
+        return self.data.get(_HISTORY_KEY, [])
+
+    def format_history_table(self) -> str:
+        """生成备份历史的对齐文本表格"""
+        history = self.get_history()
+        if not history:
+            return t("cmd.list.empty")
+
+        headers = [
+            t("table.header.time"),
+            t("table.header.source"),
+            t("table.header.size"),
+            t("table.header.files"),
+        ]
+        rows = []
+        for entry in reversed(history):
+            rows.append(
+                [
+                    entry.get("time", ""),
+                    entry.get("source", ""),
+                    str(entry.get("size_mb", 0)),
+                    str(entry.get("files_count", 0)),
+                ]
+            )
+
+        col_widths = [self._display_width(h) for h in headers]
+        for row in rows:
+            for i, cell in enumerate(row):
+                col_widths[i] = max(col_widths[i], self._display_width(cell))
+
+        fmt = " | ".join(["{:<" + str(w) + "}" for w in col_widths])
+        sep = "-+-".join(["-" * w for w in col_widths])
+
+        lines = [fmt.format(*headers), sep]
+        for row in rows:
+            lines.append(fmt.format(*row))
+        return "\n".join(lines)
 
     @staticmethod
     def _cleanup_old_backups(target_dir: str, keep: int):
@@ -418,17 +460,20 @@ class BackupManager:
         查看所有备份策略
         """
         return {
-            key: BackupEntry.from_list(raw).target for key, raw in self.data.items()
+            key: BackupEntry.from_list(raw).target
+            for key, raw in self.data.items()
+            if key != _HISTORY_KEY
         }
 
     @staticmethod
     def _display_width(s: str) -> int:
-        """计算字符串的终端显示宽度（中文字符算2，英文字符算1）"""
+        """计算字符串的终端显示宽度（东亚宽字符算2，其余算1）"""
         if not isinstance(s, str):
             return len(str(s))
         width = 0
         for ch in s:
-            if ord(ch) > 0x2E80:
+            eaw = unicodedata.east_asian_width(ch)
+            if eaw in ("W", "F"):
                 width += 2
             else:
                 width += 1
@@ -438,7 +483,8 @@ class BackupManager:
         """
         生成对齐的文本表格
         """
-        if not self.data:
+        non_history_keys = [k for k in self.data if k != _HISTORY_KEY]
+        if not non_history_keys:
             return t("cmd.all.empty")
 
         headers = [
@@ -449,7 +495,7 @@ class BackupManager:
         ]
         rows = []
         for path, raw in self.data.items():
-            if path == "_history":
+            if path == _HISTORY_KEY:
                 continue
             entry = BackupEntry.from_list(raw)
             fmt_display = (

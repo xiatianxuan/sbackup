@@ -23,6 +23,9 @@ class TestMain(unittest.TestCase):
         self.data_path = os.path.join(self.test_dir, "sbackup.json")
         with open(os.path.join(self.test_dir, "config.json"), "w") as f:
             json.dump({"data_file": self.data_path}, f)
+        # 创建独立的目标目录（不能与源目录相同）
+        self.dest_dir = os.path.join(self.test_dir, "backup_dest")
+        os.makedirs(self.dest_dir, exist_ok=True)
 
     def tearDown(self):
         sys.argv = self.original_argv
@@ -117,7 +120,7 @@ class TestMain(unittest.TestCase):
     def test_rm_command_success(self, mock_print):
         """测试 rm 命令成功删除策略"""
         os.chdir(self.test_dir)
-        sys.argv = ["sbackup", "--lang", "en_US", "add", self.test_dir, self.test_dir]
+        sys.argv = ["sbackup", "--lang", "en_US", "add", self.test_dir, self.dest_dir]
         from sbackup import run
 
         result1 = run()
@@ -187,7 +190,7 @@ class TestMain(unittest.TestCase):
             "en_US",
             "add",
             self.test_dir,
-            self.test_dir,
+            self.dest_dir,
             "--format",
             "tar.gz",
         ]
@@ -216,6 +219,27 @@ class TestMain(unittest.TestCase):
         # 解析整数间隔值也应正常工作
         args = parser.parse_args(["watch", "--interval", "30"])
         self.assertEqual(args.interval, 30)
+
+    def test_restore_password_argument(self):
+        """测试 restore --password 参数"""
+        from sbackup import get_parser
+
+        parser = get_parser()
+        args = parser.parse_args(
+            ["restore", "backup.7z", "/tmp", "--password", "secret"]
+        )
+        self.assertEqual(args.command, "restore")
+        self.assertEqual(args.backup_file, "backup.7z")
+        self.assertEqual(args.target_dir, "/tmp")
+        self.assertEqual(args.password, "secret")
+
+    def test_restore_password_default_empty(self):
+        """测试 restore --password 默认为空"""
+        from sbackup import get_parser
+
+        parser = get_parser()
+        args = parser.parse_args(["restore", "backup.zip", "/tmp"])
+        self.assertEqual(args.password, "")
 
     def test_argparse_invalid_choice_localized(self):
         """测试 argparse 无效选择错误被本地化"""
@@ -294,6 +318,28 @@ class TestMain(unittest.TestCase):
         self.assertIn("not configured", printed)
 
     @patch("builtins.print")
+    def test_sftp_no_action(self, mock_print):
+        """测试 sftp 无子命令时提示并返回 1"""
+        os.chdir(self.test_dir)
+        sys.argv = ["sbackup", "--lang", "en_US", "sftp"]
+        from sbackup import run
+
+        result = run()
+        self.assertEqual(result, 1)
+        mock_print.assert_called()
+
+    @patch("builtins.print")
+    def test_webdav_no_action(self, mock_print):
+        """测试 webdav 无子命令时提示并返回 1"""
+        os.chdir(self.test_dir)
+        sys.argv = ["sbackup", "--lang", "en_US", "webdav"]
+        from sbackup import run
+
+        result = run()
+        self.assertEqual(result, 1)
+        mock_print.assert_called()
+
+    @patch("builtins.print")
     @patch("builtins.input")
     @patch("getpass.getpass")
     @patch("sbackup.sftp.SFTPClient.try_default_key", return_value=None)
@@ -351,6 +397,37 @@ class TestMain(unittest.TestCase):
         self.assertEqual(result, 0)
         printed = " ".join(str(call) for call in mock_print.call_args_list)
         self.assertIn("saved", printed)
+
+    @patch("builtins.print")
+    @patch("sbackup.sftp.SFTPClient._load_private_key", return_value=MagicMock())
+    @patch("sbackup.sftp.SFTPClient.try_default_key", return_value=None)
+    def test_sftp_config_key_no_passphrase_needed(
+        self, mock_try_key, mock_load_key, mock_print
+    ):
+        """测试 sftp config --key-file 私钥不需要密码短语时不提示输入"""
+        os.chdir(self.test_dir)
+        sys.argv = [
+            "sbackup",
+            "--lang",
+            "en_US",
+            "sftp",
+            "config",
+            "--host",
+            "myhost",
+            "--port",
+            "22",
+            "--user",
+            "admin",
+            "--key-file",
+            "/path/to/id_rsa",
+            "--remote-path",
+            "/backups",
+        ]
+        from sbackup import run
+
+        result = run()
+        self.assertEqual(result, 0)
+        mock_load_key.assert_called_once()
 
     @patch("builtins.print")
     def test_sftp_test_with_config(self, mock_print):

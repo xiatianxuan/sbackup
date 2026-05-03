@@ -9,6 +9,7 @@ import tempfile
 import shutil
 import time
 from pathlib import Path
+from unittest.mock import patch, MagicMock
 from sbackup.auto_save import BackupManager
 from sbackup.i18n import t
 
@@ -137,6 +138,11 @@ class TestAutoSave(unittest.TestCase):
     def test_add_invalid_dest(self):
         """测试添加无效目标目录应失败"""
         result = self.manager.add_folder(self.source_folder, "/nonexistent/path")
+        self.assertFalse(result)
+
+    def test_add_source_equals_dest(self):
+        """测试源目录与目标目录相同时应失败"""
+        result = self.manager.add_folder(self.source_folder, self.source_folder)
         self.assertFalse(result)
 
     def test_save_missing_source(self):
@@ -454,6 +460,241 @@ class TestAutoSave(unittest.TestCase):
         text = self.manager.list_folder_table()
         # 应包含"默认"文本（中文环境）
         self.assertIn(t("table.cell.default"), text)
+
+    def test_display_width_ascii(self):
+        """测试 ASCII 字符宽度计算"""
+        self.assertEqual(BackupManager._display_width("hello"), 5)
+
+    def test_display_width_cjk(self):
+        """测试中文字符宽度计算（每个算2）"""
+        self.assertEqual(BackupManager._display_width("你好"), 4)
+
+    def test_display_width_fullwidth(self):
+        """测试全角符号宽度计算（U+FF01-FF60 等）"""
+        # Ａ 是全角大写 A，宽度应为2
+        self.assertEqual(BackupManager._display_width("Ａ"), 2)
+        # ！ 是全角感叹号
+        self.assertEqual(BackupManager._display_width("！"), 2)
+
+    def test_display_width_mixed(self):
+        """测试中英混合字符串宽度"""
+        # "hi你好" = 1+1+2+2 = 6
+        self.assertEqual(BackupManager._display_width("hi你好"), 6)
+
+    def test_display_width_non_string(self):
+        """测试非字符串输入"""
+        self.assertEqual(BackupManager._display_width(123), 3)
+
+    def test_display_width_empty(self):
+        """测试空字符串"""
+        self.assertEqual(BackupManager._display_width(""), 0)
+
+    def test_list_folder_table_only_history(self):
+        """测试仅含 _history 数据时返回空提示"""
+        self.manager.data["_history"] = [
+            {"time": "2026-01-01", "source": "/x", "size_mb": 1.0, "files_count": 1}
+        ]
+        text = self.manager.list_folder_table()
+        self.assertEqual(text, t("cmd.all.empty"))
+
+    def test_format_history_table_empty(self):
+        """测试无历史记录时返回提示"""
+        text = self.manager.format_history_table()
+        self.assertEqual(text, t("cmd.list.empty"))
+
+    def test_format_history_table_with_data(self):
+        """测试有历史记录时生成表格"""
+        self.manager.add_folder(self.source_folder, self.target_folder, "")
+        import time
+
+        time.sleep(0.1)
+        (Path(self.source_folder) / "f.txt").write_text("x")
+        self.manager.execute_backups()
+        text = self.manager.format_history_table()
+        self.assertIn(self.source_folder, text)
+        self.assertIn(t("table.header.time"), text)
+
+    def test_entry_from_list_invalid_data(self):
+        """测试 from_list 输入验证：非列表返回空条目"""
+        from sbackup.auto_save import BackupEntry
+
+        entry = BackupEntry.from_list("not a list")
+        self.assertEqual(entry.mtime, 0.0)
+        self.assertEqual(entry.target, "")
+
+    def test_entry_from_list_too_short(self):
+        """测试 from_list 输入验证：少于3元素返回空条目"""
+        from sbackup.auto_save import BackupEntry
+
+        entry = BackupEntry.from_list([1.0, "/path"])
+        self.assertEqual(entry.mtime, 0.0)
+        self.assertEqual(entry.target, "")
+
+    def test_entry_from_list_empty(self):
+        """测试 from_list 输入验证：空列表"""
+        from sbackup.auto_save import BackupEntry
+
+        entry = BackupEntry.from_list([])
+        self.assertEqual(entry.mtime, 0.0)
+
+
+class TestUploadSftp(unittest.TestCase):
+    """测试 _upload_to_sftp 静态方法"""
+
+    def setUp(self):
+        self.test_dir = tempfile.mkdtemp()
+        self.test_file = os.path.join(self.test_dir, "backup.zip")
+        with open(self.test_file, "w") as f:
+            f.write("fake backup")
+
+    def tearDown(self):
+        shutil.rmtree(self.test_dir, ignore_errors=True)
+
+    @patch("sbackup.sftp.SFTPClient")
+    def test_upload_not_configured(self, mock_sftp_cls):
+        """测试 SFTP 未配置时打印错误"""
+        from sbackup.config import Config
+
+        config = Config(sftp_enabled=False)
+        with patch("builtins.print") as mock_print:
+            BackupManager._upload_to_sftp([self.test_file], config)
+            mock_print.assert_called()
+
+    @patch("sbackup.sftp.SFTPClient")
+    def test_upload_no_credentials(self, mock_sftp_cls):
+        """测试无凭据时打印提示"""
+        from sbackup.config import Config
+
+        mock_sftp_cls.try_default_key.return_value = None
+        config = Config(sftp_enabled=True, sftp_host="host", sftp_password="")
+        with patch("builtins.print") as mock_print:
+            BackupManager._upload_to_sftp([self.test_file], config)
+            printed = " ".join(str(c) for c in mock_print.call_args_list)
+            # 无默认私钥时应打印提示
+            self.assertIn(t("cmd.sftp.no_default_key"), printed)
+
+    @patch("sbackup.sftp.SFTPClient")
+    def test_upload_success(self, mock_sftp_cls):
+        """测试 SFTP 上传成功"""
+        from sbackup.config import Config
+
+        mock_client = MagicMock()
+        mock_sftp_cls.return_value.__enter__ = MagicMock(return_value=mock_client)
+        mock_sftp_cls.return_value.__exit__ = MagicMock(return_value=False)
+
+        config = Config(
+            sftp_enabled=True,
+            sftp_host="host",
+            sftp_user="user",
+            sftp_password="pass",
+        )
+        with patch("builtins.print"):
+            BackupManager._upload_to_sftp([self.test_file], config)
+        mock_client.upload_file.assert_called_once()
+
+    @patch("sbackup.sftp.SFTPClient")
+    def test_upload_sftp_error(self, mock_sftp_cls):
+        """测试 SFTP 上传失败"""
+        from sbackup.config import Config
+        from sbackup.sftp import SFTPError
+
+        mock_client = MagicMock()
+        mock_client.upload_file.side_effect = SFTPError("upload failed")
+        mock_sftp_cls.return_value.__enter__ = MagicMock(return_value=mock_client)
+        mock_sftp_cls.return_value.__exit__ = MagicMock(return_value=False)
+
+        config = Config(
+            sftp_enabled=True,
+            sftp_host="host",
+            sftp_user="user",
+            sftp_password="pass",
+        )
+        with patch("builtins.print") as mock_print:
+            BackupManager._upload_to_sftp([self.test_file], config)
+            printed = " ".join(str(c) for c in mock_print.call_args_list)
+            self.assertIn("upload failed", printed)
+
+
+class TestUploadWebdav(unittest.TestCase):
+    """测试 _upload_to_webdav 静态方法"""
+
+    def setUp(self):
+        self.test_dir = tempfile.mkdtemp()
+        self.test_file = os.path.join(self.test_dir, "backup.zip")
+        with open(self.test_file, "w") as f:
+            f.write("fake backup")
+
+    def tearDown(self):
+        shutil.rmtree(self.test_dir, ignore_errors=True)
+
+    @patch("sbackup.webdav.WebDAVClient")
+    def test_upload_not_configured(self, mock_wdav_cls):
+        """测试 WebDAV 未配置时打印错误"""
+        from sbackup.config import Config
+
+        config = Config(webdav_enabled=False)
+        with patch("builtins.print") as mock_print:
+            BackupManager._upload_to_webdav([self.test_file], config)
+            mock_print.assert_called()
+
+    @patch("sbackup.webdav.WebDAVClient")
+    def test_upload_success(self, mock_wdav_cls):
+        """测试 WebDAV 上传成功"""
+        from sbackup.config import Config
+
+        mock_client = MagicMock()
+        mock_wdav_cls.return_value = mock_client
+
+        config = Config(
+            webdav_enabled=True,
+            webdav_url="https://dav.example.com",
+            webdav_user="user",
+            webdav_password="pass",
+        )
+        with patch("builtins.print"):
+            BackupManager._upload_to_webdav([self.test_file], config)
+        mock_client.connect.assert_called_once()
+        mock_client.upload_file.assert_called_once()
+
+    @patch("sbackup.webdav.WebDAVClient")
+    def test_upload_webdav_error(self, mock_wdav_cls):
+        """测试 WebDAV 上传失败"""
+        from sbackup.config import Config
+        from sbackup.webdav import WebDAVError
+
+        mock_client = MagicMock()
+        mock_client.upload_file.side_effect = WebDAVError("upload failed")
+        mock_wdav_cls.return_value = mock_client
+
+        config = Config(
+            webdav_enabled=True,
+            webdav_url="https://dav.example.com",
+            webdav_user="user",
+            webdav_password="pass",
+        )
+        with patch("builtins.print") as mock_print:
+            BackupManager._upload_to_webdav([self.test_file], config)
+            printed = " ".join(str(c) for c in mock_print.call_args_list)
+            self.assertIn("upload failed", printed)
+
+    @patch("sbackup.webdav.WebDAVClient")
+    def test_upload_connect_error(self, mock_wdav_cls):
+        """测试 WebDAV 连接失败"""
+        from sbackup.config import Config
+        from sbackup.webdav import WebDAVError
+
+        mock_wdav_cls.return_value.connect.side_effect = WebDAVError("connect failed")
+
+        config = Config(
+            webdav_enabled=True,
+            webdav_url="https://dav.example.com",
+            webdav_user="user",
+            webdav_password="pass",
+        )
+        with patch("builtins.print") as mock_print:
+            BackupManager._upload_to_webdav([self.test_file], config)
+            printed = " ".join(str(c) for c in mock_print.call_args_list)
+            self.assertIn("connect failed", printed)
 
 
 if __name__ == "__main__":

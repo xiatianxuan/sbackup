@@ -9,7 +9,7 @@ from sbackup.i18n import set_locale, t
 from sbackup.config import load_config, save_lang, save_format
 from sbackup.compression import restore_backup
 
-VERSION = "1.0.0"
+VERSION = "1.0.1"
 logger = logging.getLogger(__name__)
 
 
@@ -32,7 +32,8 @@ class LocalizedArgumentParser(argparse.ArgumentParser):
         localized = localized.replace(
             "unrecognized arguments: ", t("err.argparse.unrecognized_args")
         )
-        localized = localized.replace("required", t("err.argparse.required"))
+        # "required" 仅替换独立出现的关键词（argparse 格式: "the following arguments are required"）
+        localized = localized.replace("are required", t("err.argparse.required"))
         self.print_usage(sys.stderr)
         sys.stderr.write(f"{self.prog}: {localized}\n")
         sys.exit(2)
@@ -87,6 +88,8 @@ def get_parser() -> argparse.ArgumentParser:
 
     subparsers.add_parser("all", help=t("cli.help.all"))
 
+    subparsers.add_parser("list", aliases=["history"], help=t("cli.help.list"))
+
     save_parser = subparsers.add_parser("save", help=t("cli.help.save"))
     save_parser.add_argument(
         "--keep", type=int, default=0, help=t("cli.help.save.keep")
@@ -119,6 +122,15 @@ def get_parser() -> argparse.ArgumentParser:
     restore_parser = subparsers.add_parser("restore", help=t("cli.help.restore"))
     restore_parser.add_argument("backup_file", help=t("cli.help.restore.file"))
     restore_parser.add_argument("target_dir", help=t("cli.help.restore.dir"))
+    restore_parser.add_argument(
+        "--password", default="", help=t("cli.help.restore.password")
+    )
+    restore_parser.add_argument(
+        "-l", "--list", action="store_true", help=t("cli.help.restore.list")
+    )
+
+    verify_parser = subparsers.add_parser("verify", help=t("cli.help.verify"))
+    verify_parser.add_argument("backup_file", help=t("cli.help.verify.file"))
 
     sftp_parser = subparsers.add_parser("sftp", help=t("cli.help.sftp"))
     sftp_sub = sftp_parser.add_subparsers(
@@ -218,7 +230,11 @@ def _handle_sftp(args, config) -> int:
         )
         try:
             port = int(port_str)
+            if not (1 <= port <= 65535):
+                print(t("err.sftp.ssh", error=f"port {port} out of range"))
+                port = 22
         except ValueError:
+            print(t("err.sftp.ssh", error=f"invalid port: {port_str}"))
             port = 22
         user = args.user or input(t("cli.prompt.sftp.user") + " ")
         key_file_input = args.key_file or input(t("cli.prompt.sftp.key_file") + " ")
@@ -247,12 +263,21 @@ def _handle_sftp(args, config) -> int:
                 )
                 key_passphrase_input = ""
         else:
-            password = args.password or getpass.getpass(
-                t("cli.prompt.sftp.password") + " "
-            )
-            key_passphrase_input = args.key_passphrase or getpass.getpass(
-                t("cli.prompt.sftp.key_passphrase") + " "
-            )
+            # 用户指定了私钥，先尝试无密码加载，需要时再提示
+            if not args.key_passphrase:
+                key_passphrase_input = _try_load_key_passphrase(key_file_input)
+                if key_passphrase_input is None:
+                    # 用户放弃输入密码短语，回退到密码认证
+                    key_file_input = ""
+                    password = args.password or getpass.getpass(
+                        t("cli.prompt.sftp.password") + " "
+                    )
+                    key_passphrase_input = ""
+                else:
+                    password = ""
+            else:
+                password = ""
+                key_passphrase_input = args.key_passphrase
 
         remote_path = (
             args.remote_path or input(t("cli.prompt.sftp.remote_path") + " ") or "/"
@@ -320,7 +345,8 @@ def _handle_sftp(args, config) -> int:
             print(str(e))
             return 1
 
-    return 0
+    print(t("cli.help.sftp.action"))
+    return 1
 
 
 def _handle_webdav(args, config) -> int:
@@ -362,7 +388,8 @@ def _handle_webdav(args, config) -> int:
             print(str(e))
             return 1
 
-    return 0
+    print(t("cli.help.webdav.action"))
+    return 1
 
 
 def run() -> int:
@@ -426,6 +453,9 @@ def run() -> int:
     elif args.command == "all":
         print(manager.list_folder_table())
         return 0
+    elif args.command in ("list", "history"):
+        print(manager.format_history_table())
+        return 0
     elif args.command == "save":
         manager.execute_backups(
             keep=args.keep,
@@ -437,7 +467,7 @@ def run() -> int:
     elif args.command == "watch":
         import time as _time
 
-        interval_sec = args.interval * 60
+        interval_sec = max(args.interval, 0.1) * 60  # 最小 6 秒
         print(t("cmd.watch.start", interval=args.interval))
         try:
             while True:
@@ -451,7 +481,17 @@ def run() -> int:
         except KeyboardInterrupt:
             return 0
     elif args.command == "restore":
-        result = restore_backup(args.backup_file, args.target_dir)
+        if args.list:
+            from sbackup.compression import list_backup_contents
+
+            print(list_backup_contents(args.backup_file, args.password))
+            return 0
+        result = restore_backup(args.backup_file, args.target_dir, args.password)
+        return 0 if result["success"] else 1
+    elif args.command == "verify":
+        from sbackup.compression import verify_backup
+
+        result = verify_backup(args.backup_file, args.password)
         return 0 if result["success"] else 1
     elif args.command == "sftp":
         return _handle_sftp(args, config)

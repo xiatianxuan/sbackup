@@ -71,10 +71,13 @@ class SFTPClient:
                 )
             self._sftp = paramiko.SFTPClient.from_transport(self._transport)
         except paramiko.AuthenticationException:
+            self.disconnect()
             raise SFTPError(t("err.sftp.auth", host=self.host))
         except paramiko.SSHException as e:
+            self.disconnect()
             raise SFTPError(t("err.sftp.ssh", error=str(e)))
         except OSError as e:
+            self.disconnect()
             raise SFTPError(
                 t("err.sftp.connect", host=self.host, port=self.port, error=str(e))
             )
@@ -130,12 +133,21 @@ class SFTPClient:
         return None
 
     def disconnect(self) -> None:
-        """断开 SFTP 连接"""
-        if self._sftp is not None:
-            self._sftp.close()
+        """断开 SFTP 连接（确保每个资源都被清理）"""
+        try:
+            if self._sftp is not None:
+                self._sftp.close()
+        except Exception:
+            pass
+        finally:
             self._sftp = None
-        if self._transport is not None:
-            self._transport.close()
+
+        try:
+            if self._transport is not None:
+                self._transport.close()
+        except Exception:
+            pass
+        finally:
             self._transport = None
 
     def __enter__(self):

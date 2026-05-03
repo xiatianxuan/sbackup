@@ -42,14 +42,14 @@ class WebDAVClient:
             return f"{self.url}/{path}"
         return self.url
 
-    def _request(
+    def _build_request(
         self,
         method: str,
         path: str = "",
         data: bytes | None = None,
         content_type: str = "application/octet-stream",
     ) -> urllib.request.Request:
-        """构建并发送 HTTP 请求"""
+        """构建 HTTP 请求对象"""
         url = self._build_url(path)
         req = urllib.request.Request(url, method=method)
         req.add_header("Authorization", self._auth_header)
@@ -68,7 +68,7 @@ class WebDAVClient:
         for part in parts:
             current = f"{current}/{part}" if current else part
             try:
-                req = self._request("MKCOL", current)
+                req = self._build_request("MKCOL", current)
                 urllib.request.urlopen(req, timeout=30)
                 logger.debug("创建远程目录: %s", current)
             except urllib.error.HTTPError as e:
@@ -85,7 +85,7 @@ class WebDAVClient:
     def connect(self) -> None:
         """测试 WebDAV 连接（PROPFIND）"""
         try:
-            req = self._request(
+            req = self._build_request(
                 "PROPFIND",
                 data=b'<?xml version="1.0"?>'
                 b'<D:propfind xmlns:D="DAV:"><D:allprop/></D:propfind>',
@@ -97,7 +97,7 @@ class WebDAVClient:
         except urllib.error.HTTPError as e:
             if e.code == 401:
                 raise WebDAVError(t("err.webdav.auth", host=self.url))
-            raise WebDAVError(t("err.webdav.ssh", error=str(e)))
+            raise WebDAVError(t("err.webdav.connect", url=self.url, error=str(e)))
         except OSError as e:
             raise WebDAVError(t("err.webdav.connect", url=self.url, error=str(e)))
 
@@ -121,10 +121,13 @@ class WebDAVClient:
         )
 
         try:
+            # 流式上传：不将整个文件读入内存
+            url = self._build_url(remote_path)
             with open(local_path, "rb") as f:
-                data = f.read()
-            req = self._request("PUT", remote_path, data=data)
-            urllib.request.urlopen(req, timeout=300)
+                req = urllib.request.Request(url, data=f, method="PUT")
+                req.add_header("Authorization", self._auth_header)
+                req.add_header("Content-Length", str(file_size))
+                urllib.request.urlopen(req, timeout=300)
             logger.debug("上传成功: %s", remote_path)
             return file_size
         except urllib.error.HTTPError as e:
@@ -141,3 +144,9 @@ class WebDAVClient:
             return True
         except WebDAVError:
             return False
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        return False

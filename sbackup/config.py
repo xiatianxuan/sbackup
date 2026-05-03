@@ -14,6 +14,35 @@ logger = logging.getLogger(__name__)
 DEFAULT_SKIP_PATTERNS = [".git", "__pycache__"]
 
 
+def _load_json_file(config_file: str) -> dict:
+    """读取 JSON 配置文件，损坏时返回空字典"""
+    if not os.path.exists(config_file):
+        return {}
+    try:
+        with open(config_file, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except json.JSONDecodeError:
+        logger.warning(t("log.config.reset"), config_file)
+        return {}
+
+
+def _save_json_file(data: dict, config_file: str) -> None:
+    """将字典写入 JSON 配置文件，自动创建目录"""
+    data_dir = os.path.dirname(config_file)
+    if data_dir:
+        try:
+            os.makedirs(data_dir, exist_ok=True)
+        except OSError as e:
+            logger.error(t("log.config.mkdir.error"), data_dir, e)
+            return
+
+    try:
+        with open(config_file, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=4)
+    except OSError as e:
+        logger.error(t("log.config.write.error"), config_file, e)
+
+
 def get_default_data_file() -> str:
     """返回跨平台的默认数据文件路径"""
     if sys.platform == "win32":
@@ -72,7 +101,7 @@ def load_config(config_file: str = "config.json") -> Config:
     compression_config = config_data.get("compression", {})
     skip_patterns = config_data.get("skip_patterns", DEFAULT_SKIP_PATTERNS)
     data_file = config_data.get("data_file", get_default_data_file())
-    lang = config_data.get("lang", "en_US")
+    lang = config_data.get("lang", "zh_CN")
     compression_format = config_data.get("compression_format", "ZIP")
     sftp_config = config_data.get("sftp", {})
     webdav_config = config_data.get("webdav", {})
@@ -103,65 +132,17 @@ def load_config(config_file: str = "config.json") -> Config:
 
 
 def save_lang(lang: str, config_file: str = "config.json") -> None:
-    """
-    将语言偏好保存到配置文件
-    """
-    if os.path.exists(config_file):
-        try:
-            with open(config_file, "r", encoding="utf-8") as f:
-                data = json.load(f)
-        except json.JSONDecodeError:
-            logger.warning(t("log.config.reset"), config_file)
-            data = {}
-    else:
-        data = {}
-
+    """将语言偏好保存到配置文件"""
+    data = _load_json_file(config_file)
     data["lang"] = lang
-
-    data_dir = os.path.dirname(config_file)
-    if data_dir:
-        try:
-            os.makedirs(data_dir, exist_ok=True)
-        except OSError as e:
-            logger.error(t("log.config.mkdir.error"), data_dir, e)
-            return
-
-    try:
-        with open(config_file, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=4)
-    except OSError as e:
-        logger.error(t("log.config.write.error"), config_file, e)
+    _save_json_file(data, config_file)
 
 
 def save_format(fmt: str, config_file: str = "config.json") -> None:
-    """
-    将打包格式偏好保存到配置文件
-    """
-    if os.path.exists(config_file):
-        try:
-            with open(config_file, "r", encoding="utf-8") as f:
-                data = json.load(f)
-        except json.JSONDecodeError:
-            logger.warning(t("log.config.reset"), config_file)
-            data = {}
-    else:
-        data = {}
-
+    """将打包格式偏好保存到配置文件"""
+    data = _load_json_file(config_file)
     data["compression_format"] = fmt
-
-    data_dir = os.path.dirname(config_file)
-    if data_dir:
-        try:
-            os.makedirs(data_dir, exist_ok=True)
-        except OSError as e:
-            logger.error(t("log.config.mkdir.error"), data_dir, e)
-            return
-
-    try:
-        with open(config_file, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=4)
-    except OSError as e:
-        logger.error(t("log.config.write.error"), config_file, e)
+    _save_json_file(data, config_file)
 
 
 def save_sftp_config(
@@ -175,19 +156,8 @@ def save_sftp_config(
     key_passphrase: str = "",
     config_file: str = "config.json",
 ) -> None:
-    """
-    将 SFTP 配置保存到配置文件
-    """
-    if os.path.exists(config_file):
-        try:
-            with open(config_file, "r", encoding="utf-8") as f:
-                data = json.load(f)
-        except json.JSONDecodeError:
-            logger.warning(t("log.config.reset"), config_file)
-            data = {}
-    else:
-        data = {}
-
+    """将 SFTP 配置保存到配置文件"""
+    data = _load_json_file(config_file)
     data["sftp"] = {
         "host": host,
         "port": port,
@@ -198,20 +168,7 @@ def save_sftp_config(
         "remote_path": remote_path,
         "enabled": enabled,
     }
-
-    data_dir = os.path.dirname(config_file)
-    if data_dir:
-        try:
-            os.makedirs(data_dir, exist_ok=True)
-        except OSError as e:
-            logger.error(t("log.config.mkdir.error"), data_dir, e)
-            return
-
-    try:
-        with open(config_file, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=4)
-    except OSError as e:
-        logger.error(t("log.config.write.error"), config_file, e)
+    _save_json_file(data, config_file)
 
 
 def save_webdav_config(
@@ -223,16 +180,7 @@ def save_webdav_config(
     config_file: str = "config.json",
 ) -> None:
     """将 WebDAV 配置保存到配置文件"""
-    if os.path.exists(config_file):
-        try:
-            with open(config_file, "r", encoding="utf-8") as f:
-                data = json.load(f)
-        except json.JSONDecodeError:
-            logger.warning(t("log.config.reset"), config_file)
-            data = {}
-    else:
-        data = {}
-
+    data = _load_json_file(config_file)
     data["webdav"] = {
         "url": url,
         "user": user,
@@ -240,17 +188,4 @@ def save_webdav_config(
         "remote_path": remote_path,
         "enabled": enabled,
     }
-
-    data_dir = os.path.dirname(config_file)
-    if data_dir:
-        try:
-            os.makedirs(data_dir, exist_ok=True)
-        except OSError as e:
-            logger.error(t("log.config.mkdir.error"), data_dir, e)
-            return
-
-    try:
-        with open(config_file, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=4)
-    except OSError as e:
-        logger.error(t("log.config.write.error"), config_file, e)
+    _save_json_file(data, config_file)

@@ -13,6 +13,7 @@ wheels/
 .vscode/
 *.exe
 sbackup.json
+config.json
 
 # Virtual environments
 .venv

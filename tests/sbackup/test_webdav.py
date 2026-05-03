@@ -132,6 +132,89 @@ class TestWebDAVClient(unittest.TestCase):
         result = self.client.test_connection()
         self.assertFalse(result)
 
+    @patch("urllib.request.urlopen")
+    def test_ensure_remote_dir_401(self, mock_urlopen):
+        """测试 MKCOL 认证失败"""
+        import urllib.error
+
+        mock_urlopen.side_effect = urllib.error.HTTPError(
+            self.url, 401, "Unauthorized", {}, None
+        )
+        with self.assertRaises(WebDAVError) as ctx:
+            self.client._ensure_remote_dir("secret")
+        self.assertIn("auth", str(ctx.exception).lower())
+
+    @patch("urllib.request.urlopen")
+    def test_ensure_remote_dir_other_error(self, mock_urlopen):
+        """测试 MKCOL 其他 HTTP 错误"""
+        import urllib.error
+
+        mock_urlopen.side_effect = urllib.error.HTTPError(
+            self.url, 500, "Server Error", {}, None
+        )
+        with self.assertRaises(WebDAVError):
+            self.client._ensure_remote_dir("bad_dir")
+
+    @patch("urllib.request.urlopen")
+    def test_ensure_remote_dir_os_error(self, mock_urlopen):
+        """测试 MKCOL 网络错误"""
+        mock_urlopen.side_effect = OSError("Connection refused")
+        with self.assertRaises(WebDAVError):
+            self.client._ensure_remote_dir("offline_dir")
+
+    @patch("urllib.request.urlopen")
+    def test_upload_file_401(self, mock_urlopen):
+        """测试上传时认证失败"""
+        import urllib.error
+
+        mock_urlopen.side_effect = urllib.error.HTTPError(
+            self.url, 401, "Unauthorized", {}, None
+        )
+        with self.assertRaises(WebDAVError) as ctx:
+            self.client.upload_file(self.test_file, "backups/test.txt")
+        self.assertIn("auth", str(ctx.exception).lower())
+
+    @patch("urllib.request.urlopen")
+    def test_upload_file_os_error(self, mock_urlopen):
+        """测试上传时网络错误"""
+        # 首次调用 (_ensure_remote_dir 的 MKCOL) 成功，第二次 (PUT) 失败
+        mock_urlopen.side_effect = [
+            MagicMock(),  # MKCOL 成功
+            OSError("Network unreachable"),  # PUT 失败
+        ]
+        with self.assertRaises(WebDAVError) as ctx:
+            self.client.upload_file(self.test_file, "backups/test.txt")
+        self.assertIn("backups/test.txt", str(ctx.exception))
+
+    @patch("urllib.request.urlopen")
+    def test_connect_non_auth_http_error(self, mock_urlopen):
+        """测试连接时非认证 HTTP 错误"""
+        import urllib.error
+
+        mock_urlopen.side_effect = urllib.error.HTTPError(
+            self.url, 502, "Bad Gateway", {}, None
+        )
+        with self.assertRaises(WebDAVError):
+            self.client.connect()
+
+    def test_context_manager(self):
+        """测试上下文管理器"""
+        with WebDAVClient(self.url, self.user, self.password) as client:
+            self.assertIsInstance(client, WebDAVClient)
+
+    def test_build_request(self):
+        """测试 _build_request 构建请求对象"""
+        req = self.client._build_request("GET", "test/path")
+        self.assertEqual(req.get_method(), "GET")
+        self.assertIn("Basic", req.get_header("Authorization"))
+
+    def test_build_request_with_data(self):
+        """测试 _build_request 带数据时正确设置"""
+        data = b"test data"
+        req = self.client._build_request("PUT", "upload.txt", data=data)
+        self.assertEqual(req.get_method(), "PUT")
+        self.assertEqual(req.full_url, "https://dav.jianguoyun.com/dav/upload.txt")
+
 
 if __name__ == "__main__":
     unittest.main()

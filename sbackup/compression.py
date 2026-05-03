@@ -2,15 +2,18 @@
 压缩模块：ZIP / TAR / Zstd / 7z 文件压缩逻辑
 """
 
+import logging
 import os
-import io
 import tarfile
+import tempfile
 import zipfile
 from pathlib import Path
 from fnmatch import fnmatch
 from tqdm import tqdm
 from sbackup.i18n import t
 from sbackup.config import Config
+
+logger = logging.getLogger(__name__)
 
 # compresslevel 仅对 ZIP_DEFLATED 和 ZIP_BZIP2 有效
 _VALID_COMPRESSLEVEL_ALGORITHMS = {zipfile.ZIP_DEFLATED, zipfile.ZIP_BZIP2}
@@ -27,6 +30,8 @@ _TAR_FORMATS = {
 class BaseCompressor:
     """压缩器基类，提供公共的文件收集和忽略逻辑"""
 
+    _IGNORE_FILENAME = ".sbackupignore"
+
     def __init__(self, config: Config) -> None:
         self.folder_path: Path = Path(config.folder_path)
         self.zipfile_path: Path | None = (
@@ -35,18 +40,51 @@ class BaseCompressor:
         self.skip_patterns: list[str] = config.skip_patterns
         self.compression_level: int | None = None
 
-    def _should_ignore(self, rel_path: str) -> bool:
-        """检查相对路径是否匹配忽略模式（支持路径级匹配如 subdir/*.log）"""
-        for pattern in self.skip_patterns:
+    def _load_ignore_file(self, folder_path: Path) -> list[str]:
+        """从源目录的 .sbackupignore 文件加载忽略规则"""
+        ignore_file = folder_path / self._IGNORE_FILENAME
+        if not ignore_file.is_file():
+            return []
+        try:
+            lines = ignore_file.read_text(encoding="utf-8").splitlines()
+            patterns = []
+            for line in lines:
+                line = line.strip()
+                if line and not line.startswith("#"):
+                    patterns.append(line)
+            if patterns:
+                logger.debug(t("log.ignore.loaded"), ignore_file)
+            return patterns
+        except OSError:
+            return []
+
+    def _should_ignore(
+        self, rel_path: str, extra_patterns: list[str] | None = None
+    ) -> bool:
+        """检查相对路径是否匹配忽略模式（支持 ** 递归匹配和 ! 取反）"""
+        all_patterns = self.skip_patterns + (extra_patterns or [])
+        negated = []
+        matched = False
+        for pattern in all_patterns:
+            if pattern.startswith("!"):
+                negated.append(pattern[1:])
+                continue
             if fnmatch(rel_path, pattern) or fnmatch(
                 os.path.basename(rel_path), pattern
             ):
-                return True
-        return False
+                matched = True
+        # 取反模式可以恢复被忽略的文件
+        for pattern in negated:
+            if fnmatch(rel_path, pattern) or fnmatch(
+                os.path.basename(rel_path), pattern
+            ):
+                return False
+        return matched
 
     def _collect_files(self, folder_path: Path) -> list[tuple[str, str]]:
         """遍历文件夹收集需要压缩的文件列表，处理权限错误"""
         files = []
+        extra_patterns = self._load_ignore_file(folder_path)
         try:
             for dirpath, dirnames, filenames in os.walk(folder_path):
                 try:
@@ -59,7 +97,8 @@ class BaseCompressor:
                         if not self._should_ignore(
                             os.path.join(rel_dir, d).replace("\\", "/")
                             if rel_dir
-                            else d
+                            else d,
+                            extra_patterns,
                         )
                     ]
                     for filename in filenames:
@@ -68,7 +107,7 @@ class BaseCompressor:
                             if rel_dir
                             else filename
                         )
-                        if not self._should_ignore(file_rel):
+                        if not self._should_ignore(file_rel, extra_patterns):
                             files.append((dirpath, filename))
                 except PermissionError:
                     print(t("err.permission", path=dirpath))
@@ -199,7 +238,7 @@ class TarfileCompression(BaseCompressor):
 
     def __init__(self, config: Config) -> None:
         super().__init__(config)
-        fmt = config.compression_format.upper()
+        fmt = config.compression_format.upper().replace(".", "_")
         if fmt not in _TAR_FORMATS:
             fmt = "TAR_GZ"
         self._extension, self._mode = _TAR_FORMATS[fmt]
@@ -334,28 +373,26 @@ class ZstdCompression(BaseCompressor):
 
         try:
             cctx = zstd.ZstdCompressor(level=self.compression_level)
-            # 先创建 tar，再用 zstd 压缩
-            tar_buffer = io.BytesIO()
-            with tarfile.open(fileobj=tar_buffer, mode="w") as tarf:
-                with tqdm(
-                    total=total_files,
-                    desc=t("compress.progress"),
-                    unit=t("compress.unit"),
-                ) as pbar:
-                    for dirpath, filename in files_to_compress:
-                        file_path = Path(dirpath) / filename
-                        arcname = str(
-                            folder_path.name / file_path.relative_to(folder_path)
-                        ).replace("\\", "/")
-                        try:
-                            tarf.add(file_path, arcname=arcname, recursive=False)
-                            pbar.update(1)
-                            files_count += 1
-                        except (FileNotFoundError, PermissionError):
-                            continue
-
-            compressed = cctx.compress(tar_buffer.getvalue())
-            output_path.write_bytes(compressed)
+            with open(output_path, "wb") as f_out:
+                compressor = cctx.stream_writer(f_out)
+                with tarfile.open(fileobj=compressor, mode="w") as tarf:
+                    with tqdm(
+                        total=total_files,
+                        desc=t("compress.progress"),
+                        unit=t("compress.unit"),
+                    ) as pbar:
+                        for dirpath, filename in files_to_compress:
+                            file_path = Path(dirpath) / filename
+                            arcname = str(
+                                folder_path.name / file_path.relative_to(folder_path)
+                            ).replace("\\", "/")
+                            try:
+                                tarf.add(file_path, arcname=arcname, recursive=False)
+                                pbar.update(1)
+                                files_count += 1
+                            except (FileNotFoundError, PermissionError):
+                                continue
+                compressor.close()
 
             size_mb = output_path.stat().st_size / (1024 * 1024)
             print(
@@ -469,7 +506,7 @@ class SevenZipCompression(BaseCompressor):
 
 def create_compressor(config: Config) -> BaseCompressor:
     """工厂函数：根据配置创建对应的压缩器"""
-    fmt = config.compression_format.upper()
+    fmt = config.compression_format.upper().replace(".", "_")
     if fmt in _TAR_FORMATS:
         return TarfileCompression(config)
     if fmt == "TAR_ZST":
@@ -479,15 +516,16 @@ def create_compressor(config: Config) -> BaseCompressor:
     return ZipfileCompression(config)
 
 
-def restore_backup(backup_path: str, target_dir: str) -> dict:
+def restore_backup(backup_path: str, target_dir: str, password: str = "") -> dict:
     """
     从备份文件还原到目标目录
-    自动检测格式（ZIP / tar.gz / tar.bz2 / tar.xz）
+    自动检测格式（ZIP / tar.gz / tar.bz2 / tar.xz / tar.zst / 7z）
+    :param password: 解密密码（仅 7z 加密备份需要）
     :return: 包含统计信息的字典
     """
     backup = Path(backup_path)
     if not backup.exists():
-        print(t("err.folder.invalid", path=backup_path))
+        print(t("err.file.not_found", path=backup_path))
         return {"success": False, "files_count": 0}
 
     target = Path(target_dir)
@@ -511,7 +549,10 @@ def restore_backup(backup_path: str, target_dir: str) -> dict:
         elif name_lower.endswith(".7z"):
             import py7zr
 
-            with py7zr.SevenZipFile(backup, "r") as szf:
+            szf_kwargs = {"file": backup, "mode": "r"}
+            if password:
+                szf_kwargs["password"] = password
+            with py7zr.SevenZipFile(**szf_kwargs) as szf:
                 members = szf.getnames()
                 with tqdm(
                     total=len(members),
@@ -526,20 +567,28 @@ def restore_backup(backup_path: str, target_dir: str) -> dict:
             import zstandard as zstd
 
             dctx = zstd.ZstdDecompressor()
-            compressed = backup.read_bytes()
-            tar_data = dctx.decompress(compressed)
-            with tarfile.open(fileobj=io.BytesIO(tar_data), mode="r") as tarf:
-                members = tarf.getmembers()
-                with tqdm(
-                    total=len(members),
-                    desc=t("restore.progress"),
-                    unit=t("compress.unit"),
-                ) as pbar:
-                    for member in members:
-                        tarf.extract(member, target, filter="data")
-                        pbar.update(1)
-                print(t("restore.success", path=target, count=len(members)))
-                return {"success": True, "files_count": len(members)}
+            # tarfile 需要可 seek 的 fileobj，先流式解压到临时文件
+            with tempfile.SpooledTemporaryFile(max_size=64 * 1024 * 1024) as tmp:
+                with open(backup, "rb") as f_in:
+                    reader = dctx.stream_reader(f_in)
+                    while True:
+                        chunk = reader.read(65536)
+                        if not chunk:
+                            break
+                        tmp.write(chunk)
+                tmp.seek(0)
+                with tarfile.open(fileobj=tmp, mode="r") as tarf:
+                    members = tarf.getmembers()
+                    with tqdm(
+                        total=len(members),
+                        desc=t("restore.progress"),
+                        unit=t("compress.unit"),
+                    ) as pbar:
+                        for member in members:
+                            tarf.extract(member, target, filter="data")
+                            pbar.update(1)
+                    print(t("restore.success", path=target, count=len(members)))
+                    return {"success": True, "files_count": len(members)}
         elif name_lower.endswith(".tar.gz") or name_lower.endswith(".tgz"):
             mode = "r:gz"
         elif name_lower.endswith(".tar.bz2") or name_lower.endswith(".tbz2"):
@@ -573,3 +622,126 @@ def restore_backup(backup_path: str, target_dir: str) -> dict:
     except Exception as e:
         print(t("err.unknown", error=e))
         return {"success": False, "files_count": 0}
+
+
+def _get_archive_member_names(backup: Path, password: str = "") -> list[str]:
+    """获取压缩包内所有成员名称，自动检测格式"""
+    name_lower = backup.name.lower()
+    if name_lower.endswith(".zip"):
+        with zipfile.ZipFile(backup, "r") as zf:
+            return zf.namelist()
+    elif name_lower.endswith(".7z"):
+        import py7zr
+
+        szf_kwargs = {"file": backup, "mode": "r"}
+        if password:
+            szf_kwargs["password"] = password
+        with py7zr.SevenZipFile(**szf_kwargs) as szf:
+            return szf.getnames()
+    elif name_lower.endswith(".tar.zst"):
+        import zstandard as zstd
+
+        dctx = zstd.ZstdDecompressor()
+        with tempfile.SpooledTemporaryFile(max_size=64 * 1024 * 1024) as tmp:
+            with open(backup, "rb") as f_in:
+                reader = dctx.stream_reader(f_in)
+                while True:
+                    chunk = reader.read(65536)
+                    if not chunk:
+                        break
+                    tmp.write(chunk)
+            tmp.seek(0)
+            with tarfile.open(fileobj=tmp, mode="r") as tarf:
+                return [m.name for m in tarf.getmembers()]
+    elif name_lower.endswith(".tar.gz") or name_lower.endswith(".tgz"):
+        mode = "r:gz"
+    elif name_lower.endswith(".tar.bz2") or name_lower.endswith(".tbz2"):
+        mode = "r:bz2"
+    elif name_lower.endswith(".tar.xz") or name_lower.endswith(".txz"):
+        mode = "r:xz"
+    elif name_lower.endswith(".tar"):
+        mode = "r"
+    else:
+        return []
+    with tarfile.open(backup, mode) as tarf:
+        return tarf.getnames()
+
+
+def list_backup_contents(backup_path: str, password: str = "") -> str:
+    """
+    列出备份文件内的所有文件，不解压
+    :return: 格式化的文件列表字符串
+    """
+    backup = Path(backup_path)
+    if not backup.exists():
+        return t("err.file.not_found", path=backup_path)
+
+    try:
+        members = _get_archive_member_names(backup, password)
+    except Exception as e:
+        return t("err.unknown", error=e)
+
+    if not members:
+        return t("restore.list.empty", path=backup_path)
+
+    lines = [t("restore.list.title", path=backup_path)]
+    for name in members:
+        lines.append(f"  {name}")
+    lines.append(f"\n({len(members)} files)")
+    return "\n".join(lines)
+
+
+def verify_backup(backup_path: str, password: str = "") -> dict:
+    """
+    校验备份文件完整性：解压到临时目录后比对文件数
+    :return: 包含校验结果的字典
+    """
+    backup = Path(backup_path)
+    if not backup.exists():
+        print(t("err.file.not_found", path=backup_path))
+        return {"success": False, "files_count": 0}
+
+    print(t("cmd.verify.checking", path=backup_path))
+
+    try:
+        expected_names = _get_archive_member_names(backup, password)
+    except Exception as e:
+        print(t("err.unknown", error=e))
+        return {"success": False, "files_count": 0}
+
+    # 解压到临时目录
+    import tempfile as _tempfile
+
+    with _tempfile.TemporaryDirectory() as tmp_dir:
+        result = restore_backup(backup_path, tmp_dir, password)
+        if not result["success"]:
+            print(
+                t(
+                    "cmd.verify.failed",
+                    path=backup_path,
+                    expected=len(expected_names),
+                    actual=0,
+                )
+            )
+            return {"success": False, "files_count": 0}
+
+        actual_count = result["files_count"]
+        if actual_count == len(expected_names):
+            print(
+                t(
+                    "cmd.verify.success",
+                    path=backup_path,
+                    count=actual_count,
+                )
+            )
+            return {"success": True, "files_count": actual_count}
+        else:
+            print(
+                t(
+                    "cmd.verify.failed",
+                    path=backup_path,
+                    expected=len(expected_names),
+                    actual=actual_count,
+                )
+            )
+            return {"success": False, "files_count": actual_count}

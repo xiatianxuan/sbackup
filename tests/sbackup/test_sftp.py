@@ -305,6 +305,65 @@ class TestSFTPClient(unittest.TestCase):
         mock_sftp.stat.assert_called_once_with("/existing/dir")
         mock_sftp.mkdir.assert_not_called()
 
+    @patch("paramiko.Transport")
+    @patch("paramiko.SFTPClient")
+    def test_ensure_remote_dir_nested_create(self, mock_sftp_cls, mock_transport_cls):
+        """测试远程嵌套目录逐级创建"""
+        mock_transport = MagicMock()
+        mock_transport_cls.return_value = mock_transport
+        mock_sftp = MagicMock()
+        # 所有目录都不存在
+        mock_sftp.stat.side_effect = FileNotFoundError()
+        mock_sftp_cls.from_transport.return_value = mock_sftp
+
+        client = SFTPClient(self.host, self.port, self.user, self.password)
+        client.connect()
+        client._ensure_remote_dir("/a/b/c")
+        # 应逐级创建 /a, /a/b, /a/b/c
+        expected_calls = ["/a/b/c", "/a/b", "/a"]
+        actual_calls = [c[0][0] for c in mock_sftp.stat.call_args_list]
+        self.assertEqual(actual_calls, expected_calls)
+        self.assertEqual(mock_sftp.mkdir.call_count, 3)
+
+    @patch("paramiko.Transport")
+    @patch("paramiko.SFTPClient")
+    def test_ensure_remote_dir_empty(self, mock_sftp_cls, mock_transport_cls):
+        """测试空路径不操作"""
+        mock_transport = MagicMock()
+        mock_transport_cls.return_value = mock_transport
+        mock_sftp = MagicMock()
+        mock_sftp_cls.from_transport.return_value = mock_sftp
+
+        client = SFTPClient(self.host, self.port, self.user, self.password)
+        client.connect()
+        client._ensure_remote_dir("")
+        mock_sftp.stat.assert_not_called()
+        mock_sftp.mkdir.assert_not_called()
+
+    @patch("paramiko.Transport")
+    @patch("paramiko.SFTPClient")
+    def test_ensure_remote_dir_mkdir_error(self, mock_sftp_cls, mock_transport_cls):
+        """测试创建远程目录失败"""
+        mock_transport = MagicMock()
+        mock_transport_cls.return_value = mock_transport
+        mock_sftp = MagicMock()
+        mock_sftp.stat.side_effect = FileNotFoundError()
+        mock_sftp.mkdir.side_effect = OSError("permission denied")
+        mock_sftp_cls.from_transport.return_value = mock_sftp
+
+        client = SFTPClient(self.host, self.port, self.user, self.password)
+        client.connect()
+        with self.assertRaises(SFTPError):
+            client._ensure_remote_dir("/forbidden")
+
+    @patch("paramiko.Transport")
+    @patch("paramiko.SFTPClient")
+    def test_ensure_remote_dir_not_connected(self, mock_sftp_cls, mock_transport_cls):
+        """测试未连接时 _ensure_remote_dir 不报错"""
+        client = SFTPClient(self.host, self.port, self.user, self.password)
+        client._ensure_remote_dir("/some/path")
+        # 不应抛出异常
+
     # ========== 私钥认证测试 ==========
 
     def test_init_with_key_file(self):
@@ -578,6 +637,46 @@ class TestSFTPClient(unittest.TestCase):
         mock_transport.connect.assert_called_once_with(
             username=self.user, pkey=mock_pkey
         )
+
+    # ========== 资源清理测试 ==========
+
+    @patch("paramiko.Transport")
+    @patch("paramiko.SFTPClient")
+    def test_disconnect_cleans_up_even_if_sftp_close_raises(
+        self, mock_sftp_cls, mock_transport_cls
+    ):
+        """测试 sftp.close() 异常时 transport 仍被清理"""
+        mock_transport = MagicMock()
+        mock_transport_cls.return_value = mock_transport
+        mock_sftp = MagicMock()
+        mock_sftp_cls.from_transport.return_value = mock_sftp
+        mock_sftp.close.side_effect = OSError("socket closed")
+
+        client = SFTPClient(self.host, self.port, self.user, self.password)
+        client.connect()
+        client.disconnect()
+
+        mock_transport.close.assert_called_once()
+        self.assertIsNone(client._sftp)
+        self.assertIsNone(client._transport)
+
+    @patch("paramiko.Transport")
+    def test_connect_failure_cleans_up_transport(self, mock_transport_cls):
+        """测试连接失败时 transport 被清理"""
+        import paramiko
+
+        mock_transport = MagicMock()
+        mock_transport_cls.return_value = mock_transport
+        mock_transport.connect.side_effect = paramiko.AuthenticationException(
+            "auth failed"
+        )
+
+        client = SFTPClient(self.host, self.port, self.user, self.password)
+        with self.assertRaises(SFTPError):
+            client.connect()
+
+        mock_transport.close.assert_called_once()
+        self.assertIsNone(client._transport)
 
 
 if __name__ == "__main__":
