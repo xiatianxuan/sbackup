@@ -67,6 +67,19 @@ class Config:
     lang: str = "zh_CN"
     data_file: str = field(default_factory=get_default_data_file)
     password: str = ""
+    # 备份文件名模板
+    name_template: str = ""
+    # Webhook 通知 URL
+    webhook_url: str = ""
+    # 符号链接处理
+    follow_symlinks: bool = False
+    # 文件过滤（字节数，0 = 不限制）
+    max_size: int = 0
+    min_size: int = 0
+    # 文件年龄过滤（秒，0 = 不限制）
+    max_age_seconds: float = 0
+    # 增量备份：文件级元数据 {rel_path: [mtime, size]}
+    file_metadata: dict = field(default_factory=dict)
     # SFTP 配置
     sftp_host: str = ""
     sftp_port: int = 22
@@ -103,6 +116,9 @@ def load_config(config_file: str = "config.json") -> Config:
     data_file = config_data.get("data_file", get_default_data_file())
     lang = config_data.get("lang", "zh_CN")
     compression_format = config_data.get("compression_format", "ZIP")
+    password = config_data.get("password", "")
+    name_template = config_data.get("name_template", "")
+    webhook_config = config_data.get("webhook", {})
     sftp_config = config_data.get("sftp", {})
     webdav_config = config_data.get("webdav", {})
 
@@ -115,6 +131,11 @@ def load_config(config_file: str = "config.json") -> Config:
         compression_level=compression_config.get("level", 6),
         lang=lang,
         data_file=data_file,
+        password=password,
+        name_template=name_template,
+        webhook_url=webhook_config.get("url", "")
+        if isinstance(webhook_config, dict)
+        else "",
         sftp_host=sftp_config.get("host", ""),
         sftp_port=sftp_config.get("port", 22),
         sftp_user=sftp_config.get("user", ""),

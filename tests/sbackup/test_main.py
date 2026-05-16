@@ -166,19 +166,19 @@ class TestMain(unittest.TestCase):
         os.chdir(self.test_dir)
         sys.argv = ["sbackup", "--lang", "en_US", "watch", "--interval", "1"]
         from sbackup import run
-        import sbackup.__init__ as init_module
+        from sbackup.auto_save import BackupManager
 
-        original_execute = init_module.BackupManager.execute_backups
+        original_execute = BackupManager.execute_backups
 
         def mock_execute(self, *args, **kwargs):
             raise KeyboardInterrupt()
 
-        init_module.BackupManager.execute_backups = mock_execute
+        BackupManager.execute_backups = mock_execute
         try:
             result = run()
             self.assertEqual(result, 0)
         finally:
-            init_module.BackupManager.execute_backups = original_execute
+            BackupManager.execute_backups = original_execute
 
     @patch("builtins.print")
     def test_add_with_format(self, mock_print):
@@ -294,7 +294,7 @@ class TestMain(unittest.TestCase):
         original_execute = BackupManager.execute_backups
 
         def mock_execute(
-            self, keep=0, password="", sftp_upload=False, webdav_upload=False
+            self, keep=0, password="", sftp_upload=False, webdav_upload=False, **kwargs
         ):
             self._sftp_called = sftp_upload
 
@@ -338,6 +338,57 @@ class TestMain(unittest.TestCase):
         result = run()
         self.assertEqual(result, 1)
         mock_print.assert_called()
+
+    @patch("builtins.print")
+    def test_init_command_creates_config(self, mock_print):
+        """测试 init 命令生成配置文件"""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = os.path.join(tmpdir, "config.json")
+            self.assertFalse(os.path.exists(config_path))
+            old_cwd = os.getcwd()
+            os.chdir(tmpdir)
+            try:
+                self.assertEqual(os.getcwd(), tmpdir)
+                self.assertFalse(os.path.exists("config.json"))
+                sys.argv = ["sbackup", "--lang", "en_US", "init"]
+                from sbackup import run
+
+                result = run()
+                printed = " ".join(str(c) for c in mock_print.call_args_list)
+                self.assertEqual(
+                    result, 0, f"run() returned {result}, printed: {printed}"
+                )
+                self.assertTrue(os.path.exists(config_path))
+            finally:
+                os.chdir(old_cwd)
+
+    @patch("builtins.print")
+    def test_init_command_existing_config(self, mock_print):
+        """测试 init 命令配置文件已存在时跳过"""
+        os.chdir(self.test_dir)
+        sys.argv = ["sbackup", "--lang", "en_US", "init"]
+        from sbackup import run
+
+        # config.json 已在 setUp 中创建
+        result = run()
+        self.assertEqual(result, 1)
+
+    @patch("builtins.print")
+    @patch("builtins.input", return_value="y")
+    def test_rm_all(self, mock_input, mock_print):
+        """测试 rm --all 删除所有策略"""
+        os.chdir(self.test_dir)
+        # 先添加一个策略
+        sys.argv = ["sbackup", "--lang", "en_US", "add", self.test_dir, self.dest_dir]
+        from sbackup import run
+
+        run()
+        # 再删除所有
+        sys.argv = ["sbackup", "--lang", "en_US", "rm", "--all"]
+        result = run()
+        self.assertEqual(result, 0)
 
     @patch("builtins.print")
     @patch("builtins.input")

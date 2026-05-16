@@ -209,6 +209,29 @@ class SFTPClient:
             except OSError as e:
                 raise SFTPError(t("err.sftp.mkdir", path=remote_path, error=str(e)))
 
+    @staticmethod
+    def resolve_key_passphrase(key_file: str) -> str | None:
+        """
+        检测私钥是否需要密码短语，需要时交互式提示输入
+        :return: 密码短语（空字符串表示不需要），None 表示用户放弃输入
+        """
+        import getpass
+
+        try:
+            SFTPClient._load_private_key(key_file, "")
+            return ""
+        except SFTPError:
+            while True:
+                passphrase = getpass.getpass(t("cli.prompt.sftp.key_passphrase") + " ")
+                if not passphrase:
+                    return None  # 用户放弃输入，回退到密码认证
+                # 验证密码短语是否正确
+                try:
+                    SFTPClient._load_private_key(key_file, passphrase)
+                    return passphrase
+                except SFTPError:
+                    print(t("err.sftp.wrong_passphrase"))
+
     def test_connection(self) -> bool:
         """测试 SFTP 连接是否可用"""
         try:

@@ -7,6 +7,7 @@ import os
 import tarfile
 import tempfile
 import zipfile
+from datetime import datetime
 from pathlib import Path
 from fnmatch import fnmatch
 from tqdm import tqdm
@@ -27,6 +28,83 @@ _TAR_FORMATS = {
 }
 
 
+def _resolve_name(template: str, folder_name: str) -> str:
+    """根据模板生成备份文件基础名（不含扩展名）
+
+    支持变量: {name} 文件夹名, {date} YYYY-MM-DD, {time} HHMMSS
+    空模板返回 folder_name（向后兼容）。
+    """
+    if not template:
+        return folder_name
+    now = datetime.now()
+    return template.format(
+        name=folder_name,
+        date=now.strftime("%Y-%m-%d"),
+        time=now.strftime("%H%M%S"),
+    )
+
+
+def _encrypt_file(file_path: str, password: str) -> str:
+    """用密码加密文件（PBKDF2 + XOR 流密码），返回加密后的文件路径"""
+    import hashlib
+
+    salt = os.urandom(16)
+    key = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, 100_000)
+
+    encrypted_path = file_path + ".enc"
+    with open(file_path, "rb") as fin, open(encrypted_path, "wb") as fout:
+        fout.write(salt)
+        key_stream = bytearray()
+        block_index = 0
+        while True:
+            chunk = fin.read(65536)
+            if not chunk:
+                break
+            # 生成密钥流
+            while len(key_stream) < len(chunk):
+                block_index += 1
+                key_stream.extend(
+                    hashlib.sha256(key + block_index.to_bytes(4, "big")).digest()
+                )
+            # XOR 加密
+            encrypted = bytes(a ^ b for a, b in zip(chunk, key_stream[: len(chunk)]))
+            fout.write(encrypted)
+            key_stream = key_stream[len(chunk) :]
+
+    os.remove(file_path)
+    return encrypted_path
+
+
+def _decrypt_file(encrypted_path: str, password: str) -> str:
+    """解密由 _encrypt_file 加密的文件，返回解密后的文件路径"""
+    import hashlib
+
+    decrypted_path = encrypted_path.removesuffix(".enc")
+    with open(encrypted_path, "rb") as fin:
+        salt = fin.read(16)
+        key = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, 100_000)
+
+        with open(decrypted_path, "wb") as fout:
+            key_stream = bytearray()
+            block_index = 0
+            while True:
+                chunk = fin.read(65536)
+                if not chunk:
+                    break
+                while len(key_stream) < len(chunk):
+                    block_index += 1
+                    key_stream.extend(
+                        hashlib.sha256(key + block_index.to_bytes(4, "big")).digest()
+                    )
+                decrypted = bytes(
+                    a ^ b for a, b in zip(chunk, key_stream[: len(chunk)])
+                )
+                fout.write(decrypted)
+                key_stream = key_stream[len(chunk) :]
+
+    return decrypted_path
+
+
 class BaseCompressor:
     """压缩器基类，提供公共的文件收集和忽略逻辑"""
 
@@ -38,6 +116,12 @@ class BaseCompressor:
             Path(config.zipfile_path) if config.zipfile_path else None
         )
         self.skip_patterns: list[str] = config.skip_patterns
+        self.name_template: str = config.name_template
+        self.follow_symlinks: bool = config.follow_symlinks
+        self.max_size: int = config.max_size
+        self.min_size: int = config.min_size
+        self.max_age_seconds: float = config.max_age_seconds
+        self.file_metadata: dict = config.file_metadata
         self.compression_level: int | None = None
 
     def _load_ignore_file(self, folder_path: Path) -> list[str]:
@@ -61,7 +145,7 @@ class BaseCompressor:
     def _should_ignore(
         self, rel_path: str, extra_patterns: list[str] | None = None
     ) -> bool:
-        """检查相对路径是否匹配忽略模式（支持 ** 递归匹配和 ! 取反）"""
+        """检查相对路径是否匹配忽略模式（匹配完整路径和文件名，支持 ! 取反）"""
         all_patterns = self.skip_patterns + (extra_patterns or [])
         negated = []
         matched = False
@@ -85,8 +169,15 @@ class BaseCompressor:
         """遍历文件夹收集需要压缩的文件列表，处理权限错误"""
         files = []
         extra_patterns = self._load_ignore_file(folder_path)
+        import time as _time
+
+        cutoff_time = (
+            _time.time() - self.max_age_seconds if self.max_age_seconds > 0 else 0
+        )
         try:
-            for dirpath, dirnames, filenames in os.walk(folder_path):
+            for dirpath, dirnames, filenames in os.walk(
+                folder_path, followlinks=self.follow_symlinks
+            ):
                 try:
                     rel_dir = os.path.relpath(dirpath, folder_path)
                     if rel_dir == ".":
@@ -107,8 +198,42 @@ class BaseCompressor:
                             if rel_dir
                             else filename
                         )
-                        if not self._should_ignore(file_rel, extra_patterns):
-                            files.append((dirpath, filename))
+                        if self._should_ignore(file_rel, extra_patterns):
+                            continue
+                        # 文件大小过滤
+                        if self.max_size > 0 or self.min_size > 0:
+                            try:
+                                file_path = Path(dirpath) / filename
+                                file_size = file_path.stat().st_size
+                                if self.max_size > 0 and file_size > self.max_size:
+                                    continue
+                                if self.min_size > 0 and file_size < self.min_size:
+                                    continue
+                            except OSError:
+                                pass
+                        # 文件年龄过滤
+                        if cutoff_time > 0:
+                            try:
+                                file_path = Path(dirpath) / filename
+                                if file_path.stat().st_mtime < cutoff_time:
+                                    continue
+                            except OSError:
+                                pass
+                        # 增量备份：跳过元数据未变化的文件
+                        if self.file_metadata:
+                            try:
+                                file_path = Path(dirpath) / filename
+                                stat = file_path.stat()
+                                prev = self.file_metadata.get(file_rel)
+                                if prev and len(prev) >= 2:
+                                    if (
+                                        prev[0] == stat.st_mtime
+                                        and prev[1] == stat.st_size
+                                    ):
+                                        continue
+                            except OSError:
+                                pass
+                        files.append((dirpath, filename))
                 except PermissionError:
                     print(t("err.permission", path=dirpath))
                     continue
@@ -159,11 +284,12 @@ class ZipfileCompression(BaseCompressor):
         return level
 
     def _resolve_zipfile_path(self, folder_path: Path) -> Path:
+        base_name = _resolve_name(self.name_template, folder_path.name)
         if self.zipfile_path is None:
-            return folder_path.parent / f"{folder_path.name}.zip"
+            return folder_path.parent / f"{base_name}.zip"
         zipfile_path = self.zipfile_path.resolve()
         if zipfile_path.is_dir():
-            return zipfile_path / f"{folder_path.name}.zip"
+            return zipfile_path / f"{base_name}.zip"
         if zipfile_path.suffix.lower() != ".zip":
             return zipfile_path.with_name(zipfile_path.name + ".zip")
         return zipfile_path
@@ -181,6 +307,11 @@ class ZipfileCompression(BaseCompressor):
         files_to_compress = self._collect_files(folder_path)
         total_files = len(files_to_compress)
         files_count = 0
+        original_size = sum(
+            (Path(dp) / fn).stat().st_size
+            for dp, fn in files_to_compress
+            if (Path(dp) / fn).exists()
+        )
 
         try:
             zip_kwargs = {"mode": "w", "compression": self.compression_algorithm}
@@ -206,11 +337,15 @@ class ZipfileCompression(BaseCompressor):
                             continue
 
             size_mb = zipfile_path.stat().st_size / (1024 * 1024)
+            original_mb = original_size / (1024 * 1024)
+            ratio = (1 - size_mb / original_mb) * 100 if original_mb > 0 else 0
             print(
                 t(
                     "compress.success",
                     path=zipfile_path,
+                    original=original_mb,
                     size=size_mb,
+                    ratio=ratio,
                     count=files_count,
                 )
             )
@@ -218,6 +353,7 @@ class ZipfileCompression(BaseCompressor):
                 "success": True,
                 "files_count": files_count,
                 "size_mb": size_mb,
+                "original_size_mb": original_mb,
                 "path": str(zipfile_path),
             }
         except KeyboardInterrupt:
@@ -252,11 +388,12 @@ class TarfileCompression(BaseCompressor):
         return level
 
     def _resolve_tarfile_path(self, folder_path: Path) -> Path:
+        base_name = _resolve_name(self.name_template, folder_path.name)
         if self.zipfile_path is None:
-            return folder_path.parent / f"{folder_path.name}{self._extension}"
+            return folder_path.parent / f"{base_name}{self._extension}"
         tarfile_path = self.zipfile_path.resolve()
         if tarfile_path.is_dir():
-            return tarfile_path / f"{folder_path.name}{self._extension}"
+            return tarfile_path / f"{base_name}{self._extension}"
         # 如果已有后缀，直接使用；否则追加
         name = tarfile_path.name
         if not any(
@@ -278,6 +415,11 @@ class TarfileCompression(BaseCompressor):
         files_to_compress = self._collect_files(folder_path)
         total_files = len(files_to_compress)
         files_count = 0
+        original_size = sum(
+            (Path(dp) / fn).stat().st_size
+            for dp, fn in files_to_compress
+            if (Path(dp) / fn).exists()
+        )
 
         try:
             # compresslevel 仅对 gz 和 bz2 模式有效
@@ -304,11 +446,15 @@ class TarfileCompression(BaseCompressor):
                             continue
 
             size_mb = tarfile_path.stat().st_size / (1024 * 1024)
+            original_mb = original_size / (1024 * 1024)
+            ratio = (1 - size_mb / original_mb) * 100 if original_mb > 0 else 0
             print(
                 t(
                     "compress.success",
                     path=tarfile_path,
+                    original=original_mb,
                     size=size_mb,
+                    ratio=ratio,
                     count=files_count,
                 )
             )
@@ -316,6 +462,7 @@ class TarfileCompression(BaseCompressor):
                 "success": True,
                 "files_count": files_count,
                 "size_mb": size_mb,
+                "original_size_mb": original_mb,
                 "path": str(tarfile_path),
             }
         except KeyboardInterrupt:
@@ -346,11 +493,12 @@ class ZstdCompression(BaseCompressor):
         return level
 
     def _resolve_path(self, folder_path: Path) -> Path:
+        base_name = _resolve_name(self.name_template, folder_path.name)
         if self.zipfile_path is None:
-            return folder_path.parent / f"{folder_path.name}.tar.zst"
+            return folder_path.parent / f"{base_name}.tar.zst"
         path = self.zipfile_path.resolve()
         if path.is_dir():
-            return path / f"{folder_path.name}.tar.zst"
+            return path / f"{base_name}.tar.zst"
         if not path.name.endswith(".tar.zst"):
             return path.with_name(path.name + ".tar.zst")
         return path
@@ -370,6 +518,11 @@ class ZstdCompression(BaseCompressor):
         files_to_compress = self._collect_files(folder_path)
         total_files = len(files_to_compress)
         files_count = 0
+        original_size = sum(
+            (Path(dp) / fn).stat().st_size
+            for dp, fn in files_to_compress
+            if (Path(dp) / fn).exists()
+        )
 
         try:
             cctx = zstd.ZstdCompressor(level=self.compression_level)
@@ -395,13 +548,23 @@ class ZstdCompression(BaseCompressor):
                 compressor.close()
 
             size_mb = output_path.stat().st_size / (1024 * 1024)
+            original_mb = original_size / (1024 * 1024)
+            ratio = (1 - size_mb / original_mb) * 100 if original_mb > 0 else 0
             print(
-                t("compress.success", path=output_path, size=size_mb, count=files_count)
+                t(
+                    "compress.success",
+                    path=output_path,
+                    original=original_mb,
+                    size=size_mb,
+                    ratio=ratio,
+                    count=files_count,
+                )
             )
             return {
                 "success": True,
                 "files_count": files_count,
                 "size_mb": size_mb,
+                "original_size_mb": original_mb,
                 "path": str(output_path),
             }
         except KeyboardInterrupt:
@@ -433,11 +596,12 @@ class SevenZipCompression(BaseCompressor):
         return level
 
     def _resolve_path(self, folder_path: Path) -> Path:
+        base_name = _resolve_name(self.name_template, folder_path.name)
         if self.zipfile_path is None:
-            return folder_path.parent / f"{folder_path.name}.7z"
+            return folder_path.parent / f"{base_name}.7z"
         path = self.zipfile_path.resolve()
         if path.is_dir():
-            return path / f"{folder_path.name}.7z"
+            return path / f"{base_name}.7z"
         if path.suffix.lower() != ".7z":
             return path.with_name(path.name + ".7z")
         return path
@@ -457,6 +621,11 @@ class SevenZipCompression(BaseCompressor):
         files_to_compress = self._collect_files(folder_path)
         total_files = len(files_to_compress)
         files_count = 0
+        original_size = sum(
+            (Path(dp) / fn).stat().st_size
+            for dp, fn in files_to_compress
+            if (Path(dp) / fn).exists()
+        )
 
         try:
             filters = [{"id": py7zr.FILTER_LZMA2, "preset": self.compression_level}]
@@ -482,13 +651,23 @@ class SevenZipCompression(BaseCompressor):
                             continue
 
             size_mb = output_path.stat().st_size / (1024 * 1024)
+            original_mb = original_size / (1024 * 1024)
+            ratio = (1 - size_mb / original_mb) * 100 if original_mb > 0 else 0
             print(
-                t("compress.success", path=output_path, size=size_mb, count=files_count)
+                t(
+                    "compress.success",
+                    path=output_path,
+                    original=original_mb,
+                    size=size_mb,
+                    ratio=ratio,
+                    count=files_count,
+                )
             )
             return {
                 "success": True,
                 "files_count": files_count,
                 "size_mb": size_mb,
+                "original_size_mb": original_mb,
                 "path": str(output_path),
             }
         except KeyboardInterrupt:
@@ -516,17 +695,28 @@ def create_compressor(config: Config) -> BaseCompressor:
     return ZipfileCompression(config)
 
 
-def restore_backup(backup_path: str, target_dir: str, password: str = "") -> dict:
+def restore_backup(
+    backup_path: str, target_dir: str, password: str = "", *, quiet: bool = False
+) -> dict:
     """
     从备份文件还原到目标目录
     自动检测格式（ZIP / tar.gz / tar.bz2 / tar.xz / tar.zst / 7z）
     :param password: 解密密码（仅 7z 加密备份需要）
+    :param quiet: 静默模式，不打印消息和进度条（供 verify_backup 内部调用）
     :return: 包含统计信息的字典
     """
     backup = Path(backup_path)
     if not backup.exists():
-        print(t("err.file.not_found", path=backup_path))
+        if not quiet:
+            print(t("err.file.not_found", path=backup_path))
         return {"success": False, "files_count": 0}
+
+    # 处理 .enc 加密文件
+    tmp_decrypted = None
+    if backup.name.lower().endswith(".enc") and password:
+        decrypted_path = _decrypt_file(str(backup), password)
+        backup = Path(decrypted_path)
+        tmp_decrypted = decrypted_path
 
     target = Path(target_dir)
     target.mkdir(parents=True, exist_ok=True)
@@ -540,11 +730,13 @@ def restore_backup(backup_path: str, target_dir: str, password: str = "") -> dic
                     total=len(members),
                     desc=t("restore.progress"),
                     unit=t("compress.unit"),
+                    disable=quiet,
                 ) as pbar:
                     for member in members:
                         zf.extract(member, target)
                         pbar.update(1)
-                print(t("restore.success", path=target, count=len(members)))
+                if not quiet:
+                    print(t("restore.success", path=target, count=len(members)))
                 return {"success": True, "files_count": len(members)}
         elif name_lower.endswith(".7z"):
             import py7zr
@@ -558,10 +750,12 @@ def restore_backup(backup_path: str, target_dir: str, password: str = "") -> dic
                     total=len(members),
                     desc=t("restore.progress"),
                     unit=t("compress.unit"),
+                    disable=quiet,
                 ) as pbar:
                     szf.extractall(target)
                     pbar.update(len(members))
-                print(t("restore.success", path=target, count=len(members)))
+                if not quiet:
+                    print(t("restore.success", path=target, count=len(members)))
                 return {"success": True, "files_count": len(members)}
         elif name_lower.endswith(".tar.zst"):
             import zstandard as zstd
@@ -583,11 +777,13 @@ def restore_backup(backup_path: str, target_dir: str, password: str = "") -> dic
                         total=len(members),
                         desc=t("restore.progress"),
                         unit=t("compress.unit"),
+                        disable=quiet,
                     ) as pbar:
                         for member in members:
                             tarf.extract(member, target, filter="data")
                             pbar.update(1)
-                    print(t("restore.success", path=target, count=len(members)))
+                    if not quiet:
+                        print(t("restore.success", path=target, count=len(members)))
                     return {"success": True, "files_count": len(members)}
         elif name_lower.endswith(".tar.gz") or name_lower.endswith(".tgz"):
             mode = "r:gz"
@@ -598,30 +794,41 @@ def restore_backup(backup_path: str, target_dir: str, password: str = "") -> dic
         elif name_lower.endswith(".tar"):
             mode = "r"
         else:
-            print(t("err.unknown.format", path=backup_path))
+            if not quiet:
+                print(t("err.unknown.format", path=backup_path))
             return {"success": False, "files_count": 0}
 
         with tarfile.open(backup, mode) as tarf:
             members = tarf.getmembers()
             with tqdm(
-                total=len(members), desc=t("restore.progress"), unit=t("compress.unit")
+                total=len(members),
+                desc=t("restore.progress"),
+                unit=t("compress.unit"),
+                disable=quiet,
             ) as pbar:
                 for member in members:
                     tarf.extract(member, target, filter="data")
                     pbar.update(1)
-            print(t("restore.success", path=target, count=len(members)))
+            if not quiet:
+                print(t("restore.success", path=target, count=len(members)))
             return {"success": True, "files_count": len(members)}
     except KeyboardInterrupt:
         raise
     except PermissionError:
-        print(t("err.permission", path=target_dir))
+        if not quiet:
+            print(t("err.permission", path=target_dir))
         return {"success": False, "files_count": 0}
     except OSError as e:
-        print(t("err.os", error=e))
+        if not quiet:
+            print(t("err.os", error=e))
         return {"success": False, "files_count": 0}
     except Exception as e:
-        print(t("err.unknown", error=e))
+        if not quiet:
+            print(t("err.unknown", error=e))
         return {"success": False, "files_count": 0}
+    finally:
+        if tmp_decrypted and os.path.exists(tmp_decrypted):
+            os.remove(tmp_decrypted)
 
 
 def _get_archive_member_names(backup: Path, password: str = "") -> list[str]:
@@ -713,7 +920,7 @@ def verify_backup(backup_path: str, password: str = "") -> dict:
     import tempfile as _tempfile
 
     with _tempfile.TemporaryDirectory() as tmp_dir:
-        result = restore_backup(backup_path, tmp_dir, password)
+        result = restore_backup(backup_path, tmp_dir, password, quiet=True)
         if not result["success"]:
             print(
                 t(

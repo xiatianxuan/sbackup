@@ -3,6 +3,8 @@ import json
 import shutil
 import logging
 import unicodedata
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from dataclasses import dataclass
 from sbackup.config import (
@@ -27,10 +29,17 @@ class BackupEntry:
     target: str
     skip_patterns: list[str]
     compression_format: str = ""  # 空字符串表示使用全局默认格式
+    name_template: str = ""  # 空字符串表示使用全局默认模板
 
     def to_list(self) -> list:
         """转为 JSON 兼容的列表格式"""
-        return [self.mtime, self.target, self.skip_patterns, self.compression_format]
+        return [
+            self.mtime,
+            self.target,
+            self.skip_patterns,
+            self.compression_format,
+            self.name_template,
+        ]
 
     @staticmethod
     def from_list(data: list) -> "BackupEntry":
@@ -38,8 +47,13 @@ class BackupEntry:
         if not isinstance(data, list) or len(data) < 3:
             return BackupEntry(mtime=0.0, target="", skip_patterns=[])
         fmt = data[3] if len(data) > 3 else ""
+        tpl = data[4] if len(data) > 4 else ""
         return BackupEntry(
-            mtime=data[0], target=data[1], skip_patterns=data[2], compression_format=fmt
+            mtime=data[0],
+            target=data[1],
+            skip_patterns=data[2],
+            compression_format=fmt,
+            name_template=tpl,
         )
 
 
@@ -115,10 +129,12 @@ class BackupManager:
         target_folder: str,
         skip_patterns: str | None = None,
         compression_format: str = "",
+        name_template: str = "",
     ):
         """
         添加备份策略
         :param compression_format: 条目级打包格式，空字符串使用全局默认
+        :param name_template: 条目级文件名模板，空字符串使用全局默认
         """
         if skip_patterns is None:
             skip_patterns = ",".join(DEFAULT_SKIP_PATTERNS)
@@ -150,6 +166,7 @@ class BackupManager:
                 target=os.path.abspath(target_folder),
                 skip_patterns=skip_list,
                 compression_format=compression_format,
+                name_template=name_template,
             )
         except OSError as e:
             print(t("err.os", error=e))
@@ -177,6 +194,15 @@ class BackupManager:
         password: str = "",
         sftp_upload: bool = False,
         webdav_upload: bool = False,
+        dry_run: bool = False,
+        verify: bool = False,
+        name_template: str | None = None,
+        webhook_url: str | None = None,
+        follow_symlinks: bool = False,
+        max_size: int = 0,
+        min_size: int = 0,
+        max_age_seconds: float = 0,
+        incremental: bool = False,
     ):
         """
         执行所有备份策略
@@ -184,13 +210,27 @@ class BackupManager:
         :param password: 加密密码（仅 7z 格式支持）
         :param sftp_upload: 是否在备份后上传到 SFTP 服务器
         :param webdav_upload: 是否在备份后上传到 WebDAV 服务器
+        :param dry_run: 仅预览将备份的文件，不实际执行
+        :param verify: 备份后自动校验完整性
+        :param name_template: 备份文件名模板（覆盖全局和条目级设置）
+        :param webhook_url: 备份完成后 POST 结果到此 URL
+        :param follow_symlinks: 是否跟随符号链接
+        :param max_size: 文件大小上限（字节），0 不限制
+        :param min_size: 文件大小下限（字节），0 不限制
+        :param max_age_seconds: 文件年龄上限（秒），0 不限制
+        :param incremental: 文件级增量备份（仅压缩变化的文件）
         """
         config = load_config()
-        backup_count = 0
+        start_time = time.monotonic()
+
+        # 加载文件级元数据（增量备份用）
+        file_meta_all = self.data.get("_file_meta", {}) if incremental else {}
+
+        # 收集需要备份的条目
+        tasks = []
         skip_count = 0
-        uploaded_files = []
         for key, raw in list(self.data.items()):
-            if key == _HISTORY_KEY:
+            if key in (_HISTORY_KEY, "_file_meta"):
                 continue
             if not os.path.exists(key):
                 print(t("warn.source.missing", path=key))
@@ -201,35 +241,134 @@ class BackupManager:
                 print(t("err.os", error=e))
                 continue
             entry = BackupEntry.from_list(raw)
+            file_meta = file_meta_all.get(key, {}) if incremental else {}
             if entry.mtime != current_mtime:
-                # 条目级格式优先，否则使用全局配置
-                fmt = entry.compression_format or config.compression_format
-                config_instance = Config(
-                    folder_path=key,
-                    zipfile_path=entry.target,
-                    skip_patterns=entry.skip_patterns,
-                    compression_format=fmt,
-                    compression_algorithm=config.compression_algorithm,
-                    compression_level=config.compression_level,
-                    password=password,
+                tasks.append(
+                    (
+                        key,
+                        entry,
+                        current_mtime,
+                        config,
+                        password,
+                        name_template,
+                        follow_symlinks,
+                        max_size,
+                        min_size,
+                        max_age_seconds,
+                        file_meta,
+                    )
                 )
-                result = create_compressor(config_instance).compress()
-                if result["success"]:
+            else:
+                skip_count += 1
+
+        # dry-run 模式：仅预览，不执行备份
+        if dry_run:
+            self._dry_run_preview(tasks, config)
+            return
+
+        backup_count = 0
+        verify_failures = 0
+        uploaded_files = []
+
+        if len(tasks) > 1:
+            # 并行备份多个策略
+            logger.debug(t("log.parallel.backup"), len(tasks))
+            with ThreadPoolExecutor() as executor:
+                futures = {
+                    executor.submit(self._do_backup, *task): task for task in tasks
+                }
+                for future in as_completed(futures):
+                    key, entry, current_mtime, _, _, _, _, _, _, _, _ = futures[future]
+                    try:
+                        result = future.result()
+                    except Exception as e:
+                        logger.error("Backup failed for %s: %s", key, e)
+                        result = {"success": False}
+                    if result and result.get("success"):
+                        entry.mtime = current_mtime
+                        self._set_entry(key, entry)
+                        self._add_history(
+                            key,
+                            result["size_mb"],
+                            result["files_count"],
+                            result.get("original_size_mb", 0.0),
+                        )
+                        if incremental:
+                            self.data.setdefault("_file_meta", {})[key] = (
+                                self._collect_file_meta(key)
+                            )
+                        if keep > 0:
+                            self._cleanup_old_backups(entry.target, keep)
+                        backup_count += 1
+                        if sftp_upload and result.get("path"):
+                            uploaded_files.append(result["path"])
+                        if verify and result.get("path"):
+                            if not self._verify_single(result["path"], password):
+                                verify_failures += 1
+        else:
+            # 单策略串行执行
+            for (
+                key,
+                entry,
+                current_mtime,
+                cfg,
+                pwd,
+                tpl,
+                sym,
+                mx,
+                mn,
+                age,
+                fmeta,
+            ) in tasks:
+                result = self._do_backup(
+                    key, entry, current_mtime, cfg, pwd, tpl, sym, mx, mn, age, fmeta
+                )
+                if result and result.get("success"):
                     entry.mtime = current_mtime
                     self._set_entry(key, entry)
-                    self._add_history(key, result["size_mb"], result["files_count"])
+                    self._add_history(
+                        key,
+                        result["size_mb"],
+                        result["files_count"],
+                        result.get("original_size_mb", 0.0),
+                    )
+                    if incremental:
+                        self.data.setdefault("_file_meta", {})[key] = (
+                            self._collect_file_meta(key)
+                        )
                     if keep > 0:
                         self._cleanup_old_backups(entry.target, keep)
                     backup_count += 1
                     if sftp_upload and result.get("path"):
                         uploaded_files.append(result["path"])
-            else:
-                skip_count += 1
+                    if verify and result.get("path"):
+                        if not self._verify_single(result["path"], password):
+                            verify_failures += 1
+
+        elapsed = time.monotonic() - start_time
+        total = backup_count + skip_count
+
         if backup_count > 0:
             self.save()
             print(t("cmd.save.completed", count=backup_count))
         elif skip_count > 0:
             print(t("cmd.save.uptodate"))
+
+        # 统计摘要
+        if total > 0:
+            print(
+                t(
+                    "cmd.save.summary",
+                    total=total,
+                    backed=backup_count,
+                    skipped=skip_count,
+                    elapsed=elapsed,
+                )
+            )
+
+        # 校验失败提示
+        if verify_failures > 0:
+            print(t("cmd.verify.partial_fail", count=verify_failures))
 
         # SFTP 上传
         if sftp_upload and uploaded_files:
@@ -239,30 +378,216 @@ class BackupManager:
         if webdav_upload and uploaded_files:
             self._upload_to_webdav(uploaded_files, config)
 
-    # 向后兼容别名
-    save_folder = execute_backups
+        # Webhook 通知
+        effective_webhook = webhook_url or getattr(config, "webhook_url", "")
+        if effective_webhook:
+            status = "success" if verify_failures == 0 else "partial"
+            if backup_count == 0:
+                status = "skipped"
+            self._send_webhook(
+                effective_webhook,
+                status=status,
+                backed=backup_count,
+                skipped=skip_count,
+                elapsed=elapsed,
+                verify_failures=verify_failures,
+            )
 
     @staticmethod
-    def _resolve_key_passphrase(key_file: str, SFTPClient, SFTPError) -> str | None:
-        """
-        检测私钥是否需要密码短语，需要时交互式提示输入
-        :return: 密码短语（空字符串表示不需要），None 表示用户放弃
-        """
-        try:
-            SFTPClient._load_private_key(key_file, "")
-            return ""
-        except SFTPError:
-            import getpass
+    def _do_backup(
+        key: str,
+        entry: BackupEntry,
+        current_mtime: float,
+        config: Config,
+        password: str,
+        name_template: str | None = None,
+        follow_symlinks: bool = False,
+        max_size: int = 0,
+        min_size: int = 0,
+        max_age_seconds: float = 0,
+        file_metadata: dict | None = None,
+    ) -> dict:
+        """执行单个备份策略（线程安全）"""
+        fmt = entry.compression_format or config.compression_format
+        # 模板优先级：CLI 参数 > 条目级 > 全局配置
+        effective_template = (
+            name_template or entry.name_template or config.name_template
+        )
+        # 磁盘空间检查
+        BackupManager._check_disk_space(entry.target)
+        config_instance = Config(
+            folder_path=key,
+            zipfile_path=entry.target,
+            skip_patterns=entry.skip_patterns,
+            compression_format=fmt,
+            compression_algorithm=config.compression_algorithm,
+            compression_level=config.compression_level,
+            password=password,
+            name_template=effective_template,
+            follow_symlinks=follow_symlinks,
+            max_size=max_size,
+            min_size=min_size,
+            max_age_seconds=max_age_seconds,
+            file_metadata=file_metadata or {},
+        )
+        result = create_compressor(config_instance).compress()
+        # 非 7z 格式 + 有密码 → 全格式加密
+        if result.get("success") and password and fmt != "7Z" and result.get("path"):
+            from sbackup.compression import _encrypt_file
 
-            while True:
-                passphrase = getpass.getpass(t("cli.prompt.sftp.key_passphrase") + " ")
-                if not passphrase:
-                    return None
-                try:
-                    SFTPClient._load_private_key(key_file, passphrase)
-                    return passphrase
-                except SFTPError:
-                    print(t("err.sftp.wrong_passphrase"))
+            encrypted_path = _encrypt_file(result["path"], password)
+            result["path"] = encrypted_path
+        return result
+
+    @staticmethod
+    def _collect_file_meta(source_path: str) -> dict[str, list]:
+        """收集源目录下所有文件的元数据 {rel_path: [mtime, size]}"""
+        meta = {}
+        source = Path(source_path)
+        if not source.is_dir():
+            return meta
+        try:
+            for dirpath, dirnames, filenames in os.walk(source):
+                rel_dir = os.path.relpath(dirpath, source)
+                if rel_dir == ".":
+                    rel_dir = ""
+                for filename in filenames:
+                    file_rel = (
+                        os.path.join(rel_dir, filename).replace("\\", "/")
+                        if rel_dir
+                        else filename
+                    )
+                    try:
+                        stat = (Path(dirpath) / filename).stat()
+                        meta[file_rel] = [stat.st_mtime, stat.st_size]
+                    except OSError:
+                        pass
+        except OSError:
+            pass
+        return meta
+
+    @staticmethod
+    def _check_disk_space(target_dir: str, min_ratio: float = 0.05) -> None:
+        """检查目标目录剩余空间，不足时打印警告"""
+        try:
+            target = Path(target_dir)
+            if not target.is_dir():
+                return
+            usage = shutil.disk_usage(target)
+            # 如果剩余空间不足总量的 min_ratio，发出警告
+            if usage.free < usage.total * min_ratio:
+                need_mb = (usage.total * min_ratio) / (1024 * 1024)
+                free_mb = usage.free / (1024 * 1024)
+                print(
+                    t(
+                        "warn.disk.space",
+                        path=target_dir,
+                        need=need_mb,
+                        free=free_mb,
+                    )
+                )
+        except OSError:
+            pass
+
+    @staticmethod
+    def _dry_run_preview(tasks: list[tuple], config: Config) -> None:
+        """预览将要备份的文件（dry-run 模式）"""
+        from sbackup.compression import create_compressor as _create
+
+        if not tasks:
+            print(t("cmd.dry_run.nothing"))
+            return
+
+        print(t("cmd.dry_run.header"))
+        total_files = 0
+        total_size = 0.0
+        for key, entry, _, _, _, _ in tasks:
+            fmt = entry.compression_format or config.compression_format
+            cfg = Config(
+                folder_path=key,
+                zipfile_path=entry.target,
+                skip_patterns=entry.skip_patterns,
+                compression_format=fmt,
+            )
+            compressor = _create(cfg)
+            files = compressor._collect_files(Path(key))
+            file_count = len(files)
+            size_bytes = sum(
+                (Path(dp) / fn).stat().st_size
+                for dp, fn in files
+                if (Path(dp) / fn).exists()
+            )
+            size_mb = size_bytes / (1024 * 1024)
+            total_files += file_count
+            total_size += size_mb
+            print(
+                t(
+                    "cmd.dry_run.item",
+                    source=key,
+                    target=entry.target,
+                    format=fmt,
+                    count=file_count,
+                    size=f"{size_mb:.2f}",
+                )
+            )
+        print(
+            t(
+                "cmd.dry_run.total",
+                count=len(tasks),
+                files=total_files,
+                size=f"{total_size:.2f}",
+            )
+        )
+
+    @staticmethod
+    def _verify_single(backup_path: str, password: str = "") -> bool:
+        """校验单个备份文件完整性"""
+        from sbackup.compression import verify_backup
+
+        result = verify_backup(backup_path, password)
+        return result.get("success", False)
+
+    @staticmethod
+    def _send_webhook(
+        url: str,
+        *,
+        status: str,
+        backed: int,
+        skipped: int,
+        elapsed: float,
+        verify_failures: int = 0,
+    ) -> None:
+        """POST 备份结果到 webhook URL"""
+        import urllib.request
+        import urllib.error
+        from datetime import datetime
+
+        payload = json.dumps(
+            {
+                "status": status,
+                "timestamp": datetime.now().isoformat(timespec="seconds"),
+                "backed": backed,
+                "skipped": skipped,
+                "elapsed_seconds": round(elapsed, 2),
+                "verify_failures": verify_failures,
+            },
+            ensure_ascii=False,
+        ).encode("utf-8")
+
+        try:
+            req = urllib.request.Request(
+                url,
+                data=payload,
+                method="POST",
+                headers={"Content-Type": "application/json"},
+            )
+            urllib.request.urlopen(req, timeout=10)
+            logger.debug("Webhook 通知成功: %s", url)
+        except (urllib.error.URLError, OSError) as e:
+            logger.warning("Webhook 通知失败: %s — %s", url, e)
+
+    # 向后兼容别名
+    save_folder = execute_backups
 
     @staticmethod
     def _upload_to_sftp(file_paths: list[str], config: Config) -> None:
@@ -283,9 +608,7 @@ class BackupManager:
             if default_key:
                 print(t("cmd.sftp.using_default_key", path=default_key))
                 key_file = default_key
-                key_passphrase = BackupManager._resolve_key_passphrase(
-                    default_key, SFTPClient, SFTPError
-                )
+                key_passphrase = SFTPClient.resolve_key_passphrase(default_key)
                 if key_passphrase is None:
                     key_file = ""
                     password = config.sftp_password
@@ -294,9 +617,7 @@ class BackupManager:
                 print(t("cmd.sftp.no_default_key"))
                 return
         elif key_file and not key_passphrase and not password:
-            key_passphrase = BackupManager._resolve_key_passphrase(
-                key_file, SFTPClient, SFTPError
-            )
+            key_passphrase = SFTPClient.resolve_key_passphrase(key_file)
             if key_passphrase is None:
                 key_file = ""
                 password = config.sftp_password
@@ -365,19 +686,31 @@ class BackupManager:
         except WebDAVError as e:
             print(str(e))
 
-    def _add_history(self, source: str, size_mb: float, files_count: int):
+    def _add_history(
+        self,
+        source: str,
+        size_mb: float,
+        files_count: int,
+        original_size_mb: float = 0.0,
+    ):
         """记录备份历史"""
         from datetime import datetime
 
         history = self.data.setdefault(_HISTORY_KEY, [])
-        history.append(
-            {
-                "time": datetime.now().isoformat(timespec="seconds"),
-                "source": source,
-                "size_mb": round(size_mb, 2),
-                "files_count": files_count,
-            }
-        )
+        entry = {
+            "time": datetime.now().isoformat(timespec="seconds"),
+            "source": source,
+            "size_mb": round(size_mb, 2),
+            "files_count": files_count,
+        }
+        if original_size_mb > 0:
+            entry["original_size_mb"] = round(original_size_mb, 2)
+            entry["ratio"] = (
+                round((1 - size_mb / original_size_mb) * 100, 1)
+                if original_size_mb > 0
+                else 0
+            )
+        history.append(entry)
         # 保留最近 100 条记录
         if len(history) > 100:
             self.data[_HISTORY_KEY] = history[-100:]
@@ -396,31 +729,24 @@ class BackupManager:
             t("table.header.time"),
             t("table.header.source"),
             t("table.header.size"),
+            t("table.header.ratio"),
             t("table.header.files"),
         ]
         rows = []
         for entry in reversed(history):
+            ratio = entry.get("ratio")
+            ratio_str = f"{ratio:.0f}%" if ratio is not None else "-"
             rows.append(
                 [
                     entry.get("time", ""),
                     entry.get("source", ""),
                     str(entry.get("size_mb", 0)),
+                    ratio_str,
                     str(entry.get("files_count", 0)),
                 ]
             )
 
-        col_widths = [self._display_width(h) for h in headers]
-        for row in rows:
-            for i, cell in enumerate(row):
-                col_widths[i] = max(col_widths[i], self._display_width(cell))
-
-        fmt = " | ".join(["{:<" + str(w) + "}" for w in col_widths])
-        sep = "-+-".join(["-" * w for w in col_widths])
-
-        lines = [fmt.format(*headers), sep]
-        for row in rows:
-            lines.append(fmt.format(*row))
-        return "\n".join(lines)
+        return self._render_table(headers, rows)
 
     @staticmethod
     def _cleanup_old_backups(target_dir: str, keep: int):
@@ -455,9 +781,109 @@ class BackupManager:
             except OSError:
                 pass
 
+    def export_strategies(self, output_file: str) -> int:
+        """导出所有备份策略到 JSON 文件，返回导出的策略数"""
+        export_data = {}
+        for key, raw in self.data.items():
+            if key == _HISTORY_KEY:
+                continue
+            export_data[key] = raw
+        data_dir = os.path.dirname(output_file)
+        if data_dir:
+            os.makedirs(data_dir, exist_ok=True)
+        with open(output_file, "w", encoding="utf-8") as f:
+            json.dump(export_data, f, ensure_ascii=False, indent=4)
+        return len(export_data)
+
+    def import_strategies(self, input_file: str) -> tuple[int, int] | None:
+        """从 JSON 文件导入备份策略，返回 (导入数, 跳过数) 或 None"""
+        if not os.path.exists(input_file):
+            return None
+        try:
+            with open(input_file, "r", encoding="utf-8") as f:
+                import_data = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            return None
+        if not isinstance(import_data, dict):
+            return None
+        imported = 0
+        skipped = 0
+        for key, raw in import_data.items():
+            if not isinstance(raw, list) or len(raw) < 3:
+                continue
+            if key in self.data:
+                skipped += 1
+                continue
+            self.data[key] = raw
+            imported += 1
+        if imported > 0:
+            self.save()
+        return imported, skipped
+
+    def format_status(self) -> str:
+        """生成备份状态仪表盘"""
+        lines = [t("cmd.status.header")]
+
+        # 统计策略数
+        strategies = {k: v for k, v in self.data.items() if k != _HISTORY_KEY}
+        lines.append(t("cmd.status.strategies", count=len(strategies)))
+
+        # 统计历史记录
+        history = self.get_history()
+        lines.append(t("cmd.status.history", count=len(history)))
+
+        # 计算备份总大小和平均压缩率
+        total_size = 0.0
+        ratios = []
+        for entry in history:
+            total_size += entry.get("size_mb", 0)
+            if "ratio" in entry:
+                ratios.append(entry["ratio"])
+        lines.append(t("cmd.status.total_size", size=total_size))
+        if ratios:
+            avg_ratio = sum(ratios) / len(ratios)
+            lines.append(t("cmd.status.avg_ratio", ratio=avg_ratio))
+
+        # 策略详情
+        lines.append("")
+        lines.append(t("cmd.status.strategy.header"))
+        for source, raw in strategies.items():
+            entry = BackupEntry.from_list(raw)
+            lines.append(
+                t("cmd.status.strategy.item", source=source, target=entry.target)
+            )
+            # 查找该策略的最后一次备份时间
+            last_backup = None
+            for h in reversed(history):
+                if h.get("source") == source:
+                    last_backup = h.get("time")
+                    break
+            if last_backup:
+                lines.append(t("cmd.status.strategy.last_backup", time=last_backup))
+            else:
+                lines.append(t("cmd.status.strategy.never"))
+
+            fmt = entry.compression_format or t("table.cell.default")
+            lines.append(t("cmd.status.strategy.format", format=fmt))
+
+            # 计算目标目录大小
+            target_path = Path(entry.target)
+            if target_path.is_dir():
+                dir_size = sum(
+                    f.stat().st_size for f in target_path.rglob("*") if f.is_file()
+                )
+                lines.append(
+                    t("cmd.status.strategy.size", size=dir_size / (1024 * 1024))
+                )
+
+        return "\n".join(lines)
+
     def all_folder(self) -> dict[str, str]:
         """
-        查看所有备份策略
+        查看所有备份策略（已废弃，请使用 list_folder_table）
+
+        .. deprecated::
+            CLI 的 all 命令已改用 list_folder_table()，此方法保留仅为外部 API 兼容。
         """
         return {
             key: BackupEntry.from_list(raw).target
@@ -478,6 +904,22 @@ class BackupManager:
             else:
                 width += 1
         return width
+
+    @staticmethod
+    def _render_table(headers: list[str], rows: list[list[str]]) -> str:
+        """生成对齐的文本表格"""
+        col_widths = [BackupManager._display_width(h) for h in headers]
+        for row in rows:
+            for i, cell in enumerate(row):
+                col_widths[i] = max(col_widths[i], BackupManager._display_width(cell))
+
+        fmt = " | ".join(["{:<" + str(w) + "}" for w in col_widths])
+        sep = "-+-".join(["-" * w for w in col_widths])
+
+        lines = [fmt.format(*headers), sep]
+        for row in rows:
+            lines.append(fmt.format(*row))
+        return "\n".join(lines)
 
     def list_folder_table(self) -> str:
         """
@@ -510,18 +952,4 @@ class BackupManager:
             )
             rows.append([path, entry.target, fmt_display, skip])
 
-        col_widths = [self._display_width(h) for h in headers]
-        for row in rows:
-            for i, cell in enumerate(row):
-                col_widths[i] = max(col_widths[i], self._display_width(cell))
-
-        fmt = " | ".join(["{:<" + str(w) + "}" for w in col_widths])
-        sep = "-+-".join(["-" * w for w in col_widths])
-
-        lines = []
-        lines.append(fmt.format(*headers))
-        lines.append(sep)
-        for row in rows:
-            lines.append(fmt.format(*row))
-
-        return "\n".join(lines)
+        return self._render_table(headers, rows)

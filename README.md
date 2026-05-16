@@ -553,6 +553,10 @@ A: 使用 `--keep` 参数：`uv run python main.py save --keep 5` 只保留最�
 
 A: 使用 `watch` 命令：`uv run python main.py watch --interval 60` 每 60 分钟备份一次。按 `Ctrl+C` 停止。
 
+### Q: 密码存储安全吗？
+
+A: `config.json` 中的 SFTP 密码和 7z 加密密码均以**明文**存储。请确保 `config.json` 文件的访问权限仅限于可信用户（例如 `chmod 600 config.json`）。不要将包含密码的 `config.json` 提交到版本控制系统。
+
 ## 贡献指南
 
 欢迎提交 Issue 和 Pull Request！

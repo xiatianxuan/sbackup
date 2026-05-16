@@ -327,6 +327,28 @@ class TestAutoSave(unittest.TestCase):
         BackupManager._cleanup_old_backups("/nonexistent", keep=2)
         # 不应抛出异常
 
+    def test_check_disk_space_valid_dir(self):
+        """测试磁盘空间检查不抛异常"""
+        BackupManager._check_disk_space(self.target_folder)
+        # 不应抛出异常
+
+    def test_check_disk_space_invalid_dir(self):
+        """测试磁盘空间检查无效目录不抛异常"""
+        BackupManager._check_disk_space("/nonexistent/dir")
+        # 不应抛出异常
+
+    def test_do_backup_returns_result(self):
+        """测试 _do_backup 返回正确结果"""
+        from sbackup.config import load_config
+
+        self.manager.add_folder(self.source_folder, self.target_folder, "")
+        abs_source = os.path.abspath(self.source_folder)
+        entry = self.manager._get_entry(abs_source)
+        assert entry is not None
+        config = load_config()
+        result = BackupManager._do_backup(abs_source, entry, 0.0, config, "")
+        self.assertTrue(result["success"])
+
     def test_execute_backups_with_keep(self):
         """测试执行备份时保留 N 个文件"""
         self.manager.add_folder(self.source_folder, self.target_folder, "")
@@ -413,7 +435,7 @@ class TestAutoSave(unittest.TestCase):
         entry = BackupEntry(
             mtime=1.0, target="/t", skip_patterns=[], compression_format="7Z"
         )
-        self.assertEqual(entry.to_list(), [1.0, "/t", [], "7Z"])
+        self.assertEqual(entry.to_list(), [1.0, "/t", [], "7Z", ""])
 
     def test_execute_backups_entry_format_overrides_global(self):
         """测试条目级格式优先于全局格式"""
