@@ -75,6 +75,12 @@ def get_parser() -> argparse.ArgumentParser:
         help=t("cli.help.incremental"),
     )
     parser.add_argument(
+        "--checksum",
+        action="store_true",
+        default=False,
+        help=t("cli.help.checksum"),
+    )
+    parser.add_argument(
         "--format",
         default=None,
         choices=["zip", "tar", "tar.gz", "tar.bz2", "tar.xz", "tar.zst", "7z"],
@@ -100,10 +106,29 @@ def get_parser() -> argparse.ArgumentParser:
         default=None,
         help=t("cli.help.add.name_template"),
     )
+    add_parser.add_argument(
+        "--from-gitignore",
+        default=None,
+        help=t("cli.help.add.from_gitignore"),
+    )
 
     rm_parser = subparsers.add_parser("rm", aliases=["remove"], help=t("cli.help.rm"))
     rm_parser.add_argument("path", nargs="?", default=None, help=t("cli.help.rm.path"))
     rm_parser.add_argument("--all", action="store_true", help=t("cli.help.rm.all"))
+
+    edit_parser = subparsers.add_parser("edit", help=t("cli.help.edit"))
+    edit_parser.add_argument("source", help=t("cli.help.edit.source"))
+    edit_parser.add_argument("--dest", default=None, help=t("cli.help.edit.dest"))
+    edit_parser.add_argument("--ignore", default=None, help=t("cli.help.edit.ignore"))
+    edit_parser.add_argument(
+        "--format",
+        default=None,
+        choices=["zip", "tar", "tar.gz", "tar.bz2", "tar.xz", "tar.zst", "7z"],
+        help=t("cli.help.edit.format"),
+    )
+    edit_parser.add_argument(
+        "--name-template", default=None, help=t("cli.help.edit.name_template")
+    )
 
     subparsers.add_parser("all", help=t("cli.help.all"))
 
@@ -114,6 +139,9 @@ def get_parser() -> argparse.ArgumentParser:
     save_parser = subparsers.add_parser("save", help=t("cli.help.save"))
     save_parser.add_argument(
         "--keep", type=int, default=0, help=t("cli.help.save.keep")
+    )
+    save_parser.add_argument(
+        "--keep-days", type=int, default=0, help=t("cli.help.save.keep_days")
     )
     save_parser.add_argument("--password", default="", help=t("cli.help.save.password"))
     save_parser.add_argument(
@@ -139,15 +167,34 @@ def get_parser() -> argparse.ArgumentParser:
         default=None,
         help=t("cli.help.save.name_template"),
     )
-    save_parser.add_argument("--webhook", default=None, help=t("cli.help.save.webhook"))
+    save_parser.add_argument(
+        "--webhook",
+        action="append",
+        default=None,
+        help=t("cli.help.save.webhook"),
+    )
     save_parser.add_argument(
         "--max-size", default=None, help=t("cli.help.save.max_size")
     )
     save_parser.add_argument(
         "--min-size", default=None, help=t("cli.help.save.min_size")
     )
+    save_parser.add_argument("--split", default=None, help=t("cli.help.save.split"))
+    save_parser.add_argument("--tag", default="", help=t("cli.help.save.tag"))
     save_parser.add_argument(
         "--older-than", default=None, help=t("cli.help.save.older_than")
+    )
+    save_parser.add_argument(
+        "--pre-hook",
+        action="append",
+        default=None,
+        help=t("cli.help.save.pre_hook"),
+    )
+    save_parser.add_argument(
+        "--post-hook",
+        action="append",
+        default=None,
+        help=t("cli.help.save.post_hook"),
     )
 
     watch_parser = subparsers.add_parser("watch", help=t("cli.help.watch"))
@@ -156,6 +203,9 @@ def get_parser() -> argparse.ArgumentParser:
     )
     watch_parser.add_argument(
         "--keep", type=int, default=0, help=t("cli.help.watch.keep")
+    )
+    watch_parser.add_argument(
+        "--keep-days", type=int, default=0, help=t("cli.help.watch.keep_days")
     )
     watch_parser.add_argument(
         "--password", default="", help=t("cli.help.watch.password")
@@ -184,7 +234,10 @@ def get_parser() -> argparse.ArgumentParser:
         help=t("cli.help.watch.name_template"),
     )
     watch_parser.add_argument(
-        "--webhook", default=None, help=t("cli.help.watch.webhook")
+        "--webhook",
+        action="append",
+        default=None,
+        help=t("cli.help.watch.webhook"),
     )
     watch_parser.add_argument(
         "--max-size", default=None, help=t("cli.help.watch.max_size")
@@ -192,8 +245,22 @@ def get_parser() -> argparse.ArgumentParser:
     watch_parser.add_argument(
         "--min-size", default=None, help=t("cli.help.watch.min_size")
     )
+    watch_parser.add_argument("--split", default=None, help=t("cli.help.watch.split"))
+    watch_parser.add_argument("--tag", default="", help=t("cli.help.watch.tag"))
     watch_parser.add_argument(
         "--older-than", default=None, help=t("cli.help.watch.older_than")
+    )
+    watch_parser.add_argument(
+        "--pre-hook",
+        action="append",
+        default=None,
+        help=t("cli.help.watch.pre_hook"),
+    )
+    watch_parser.add_argument(
+        "--post-hook",
+        action="append",
+        default=None,
+        help=t("cli.help.watch.post_hook"),
     )
 
     restore_parser = subparsers.add_parser("restore", help=t("cli.help.restore"))
@@ -205,9 +272,34 @@ def get_parser() -> argparse.ArgumentParser:
     restore_parser.add_argument(
         "-l", "--list", action="store_true", help=t("cli.help.restore.list")
     )
+    restore_parser.add_argument(
+        "--select",
+        default="",
+        help=t("cli.help.restore.select"),
+    )
+
+    info_parser = subparsers.add_parser("info", help=t("cli.help.info"))
+    info_parser.add_argument("backup_file", help=t("cli.help.info.file"))
+    info_parser.add_argument("--password", default="", help=t("cli.help.info.password"))
+
+    diff_parser = subparsers.add_parser("diff", help=t("cli.help.diff"))
+    diff_parser.add_argument("source", help=t("cli.help.diff.source"))
+    diff_parser.add_argument(
+        "backup_file", nargs="?", default=None, help=t("cli.help.diff.file")
+    )
+    diff_parser.add_argument("--password", default="", help=t("cli.help.diff.password"))
 
     verify_parser = subparsers.add_parser("verify", help=t("cli.help.verify"))
     verify_parser.add_argument("backup_file", help=t("cli.help.verify.file"))
+    verify_parser.add_argument(
+        "--fast",
+        action="store_true",
+        default=False,
+        help=t("cli.help.verify.fast"),
+    )
+    verify_parser.add_argument(
+        "--password", default="", help=t("cli.help.verify.password")
+    )
 
     sftp_parser = subparsers.add_parser("sftp", help=t("cli.help.sftp"))
     sftp_sub = sftp_parser.add_subparsers(
@@ -258,6 +350,29 @@ def get_parser() -> argparse.ArgumentParser:
     )
     webdav_sub.add_parser("test", help=t("cli.help.webdav.test"))
 
+    remote_parser = subparsers.add_parser("remote", help=t("cli.help.remote"))
+    remote_sub = remote_parser.add_subparsers(
+        dest="remote_action", help=t("cli.help.remote.action")
+    )
+    remote_list_parser = remote_sub.add_parser("list", help=t("cli.help.remote.list"))
+    remote_list_parser.add_argument(
+        "--path", default=None, help=t("cli.help.remote.list_path")
+    )
+    remote_list_parser.add_argument(
+        "--sftp", action="store_true", default=False, help=t("cli.help.remote.sftp")
+    )
+    remote_list_parser.add_argument(
+        "--webdav", action="store_true", default=False, help=t("cli.help.remote.webdav")
+    )
+    remote_rm_parser = remote_sub.add_parser("rm", help=t("cli.help.remote.rm"))
+    remote_rm_parser.add_argument("filename", help=t("cli.help.remote.rm.filename"))
+    remote_rm_parser.add_argument(
+        "--sftp", action="store_true", default=False, help=t("cli.help.remote.sftp")
+    )
+    remote_rm_parser.add_argument(
+        "--webdav", action="store_true", default=False, help=t("cli.help.remote.webdav")
+    )
+
     export_parser = subparsers.add_parser("export", help=t("cli.help.export"))
     export_parser.add_argument(
         "file",
@@ -269,7 +384,112 @@ def get_parser() -> argparse.ArgumentParser:
     import_parser = subparsers.add_parser("import", help=t("cli.help.import"))
     import_parser.add_argument("file", help=t("cli.help.import.file"))
 
+    ignore_parser = subparsers.add_parser("ignore", help=t("cli.help.ignore"))
+    ignore_parser.add_argument(
+        "--preset",
+        choices=["node", "python", "go", "rust", "java", "general"],
+        default="general",
+        help=t("cli.help.ignore.preset"),
+    )
+    ignore_parser.add_argument(
+        "-o",
+        "--output",
+        default=".sbackupignore",
+        help=t("cli.help.ignore.output"),
+    )
+    ignore_parser.add_argument(
+        "--list",
+        action="store_true",
+        dest="list_presets",
+        help=t("cli.help.ignore.list"),
+    )
+
     subparsers.add_parser("status", help=t("cli.help.status"))
+
+    report_parser = subparsers.add_parser("report", help=t("cli.help.report"))
+    report_parser.add_argument(
+        "-o", "--output", default="", help=t("cli.help.report.output")
+    )
+
+    search_parser = subparsers.add_parser("search", help=t("cli.help.search"))
+    search_parser.add_argument("pattern", help=t("cli.help.search.pattern"))
+    search_parser.add_argument(
+        "--in", dest="backup_file", default=None, help=t("cli.help.search.in")
+    )
+    search_parser.add_argument(
+        "--password", default="", help=t("cli.help.search.password")
+    )
+
+    versions_parser = subparsers.add_parser("versions", help=t("cli.help.versions"))
+    versions_parser.add_argument(
+        "source", nargs="?", default="", help=t("cli.help.versions.source")
+    )
+
+    schedule_parser = subparsers.add_parser("schedule", help=t("cli.help.schedule"))
+    schedule_sub = schedule_parser.add_subparsers(
+        dest="schedule_action", help=t("cli.help.schedule.action")
+    )
+    schedule_export = schedule_sub.add_parser(
+        "export", help=t("cli.help.schedule.export")
+    )
+    schedule_export.add_argument(
+        "--type",
+        choices=["systemd", "crontab", "schtasks"],
+        default="systemd",
+        help=t("cli.help.schedule.type"),
+    )
+    schedule_export.add_argument(
+        "--interval",
+        type=int,
+        default=60,
+        help=t("cli.help.schedule.interval"),
+    )
+    schedule_export.add_argument(
+        "-o", "--output", default="", help=t("cli.help.schedule.output")
+    )
+
+    webhook_parser = subparsers.add_parser("webhook", help=t("cli.help.webhook_cmd"))
+    webhook_sub = webhook_parser.add_subparsers(
+        dest="webhook_action", help=t("cli.help.webhook_cmd.action")
+    )
+    webhook_preset = webhook_sub.add_parser(
+        "preset", help=t("cli.help.webhook_cmd.preset")
+    )
+    webhook_preset.add_argument(
+        "name",
+        choices=["dingtalk", "feishu", "wechat"],
+        help=t("cli.help.webhook_cmd.preset.name"),
+    )
+    webhook_sub.add_parser("list", help=t("cli.help.webhook_cmd.list"))
+
+    config_parser = subparsers.add_parser("config", help=t("cli.help.config_cmd"))
+    config_sub = config_parser.add_subparsers(
+        dest="config_action", help=t("cli.help.config_cmd.action")
+    )
+    config_lock = config_sub.add_parser("lock", help=t("cli.help.config_cmd.lock"))
+    config_lock.add_argument(
+        "--password", default="", help=t("cli.help.config_cmd.lock.password")
+    )
+    config_unlock = config_sub.add_parser(
+        "unlock", help=t("cli.help.config_cmd.unlock")
+    )
+    config_unlock.add_argument(
+        "--password", default="", help=t("cli.help.config_cmd.unlock.password")
+    )
+
+    clean_parser = subparsers.add_parser("clean", help=t("cli.help.clean"))
+    clean_parser.add_argument(
+        "--keep", type=int, default=0, help=t("cli.help.clean.keep")
+    )
+    clean_parser.add_argument(
+        "--keep-days", type=int, default=0, help=t("cli.help.clean.keep_days")
+    )
+    clean_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        default=False,
+        help=t("cli.help.clean.dry_run"),
+    )
 
     subparsers.add_parser("version", help=t("cli.help.version"))
 
@@ -314,7 +534,29 @@ def _handle_add(args, config, manager) -> int:
     dest = parse_path(args.dest)
     entry_fmt = args.format.upper().replace(".", "_") if args.format else ""
     entry_template = args.name_template or ""
-    success = manager.add_folder(source, dest, args.ignore, entry_fmt, entry_template)
+    # 从 .gitignore 导入忽略规则
+    ignore_patterns = args.ignore
+    if args.from_gitignore:
+        from sbackup.config import parse_gitignore
+
+        gitignore_patterns = parse_gitignore(args.from_gitignore)
+        if gitignore_patterns:
+            # 合并 .gitignore 规则和默认规则
+            existing = [s.strip() for s in ignore_patterns.split(",") if s.strip()]
+            merged = existing + gitignore_patterns
+            ignore_patterns = ",".join(merged)
+            print(
+                t(
+                    "cmd.add.gitignore_imported",
+                    count=len(gitignore_patterns),
+                    path=args.from_gitignore,
+                )
+            )
+        else:
+            print(t("cmd.add.gitignore_empty", path=args.from_gitignore))
+    success = manager.add_folder(
+        source, dest, ignore_patterns, entry_fmt, entry_template
+    )
     if success:
         print(t("cmd.add.success", source=source, dest=dest))
         return 0
@@ -354,6 +596,22 @@ def _handle_all(args, config, manager) -> int:
     return 0
 
 
+def _handle_edit(args, config, manager) -> int:
+    source = parse_path(args.source)
+    new_fmt = args.format.upper().replace(".", "_") if args.format else None
+    success = manager.edit_strategy(
+        source,
+        new_target=parse_path(args.dest) if args.dest else None,
+        new_ignore=args.ignore,
+        new_format=new_fmt,
+        new_name_template=args.name_template,
+    )
+    if success:
+        print(t("cmd.edit.success", path=source))
+        return 0
+    return 1
+
+
 def _handle_list(args, config, manager) -> int:
     print(manager.format_history_table())
     return 0
@@ -362,6 +620,7 @@ def _handle_list(args, config, manager) -> int:
 def _handle_save(args, config, manager) -> int:
     manager.execute_backups(
         keep=args.keep,
+        keep_days=args.keep_days,
         password=args.password,
         sftp_upload=args.sftp,
         webdav_upload=args.webdav,
@@ -374,6 +633,11 @@ def _handle_save(args, config, manager) -> int:
         min_size=_parse_size(args.min_size) if args.min_size else 0,
         max_age_seconds=_parse_duration(args.older_than) if args.older_than else 0,
         incremental=args.incremental,
+        split_size=_parse_size(args.split) if args.split else 0,
+        tag=args.tag or "",
+        checksum=args.checksum,
+        pre_hooks=getattr(args, "pre_hook", None) or [],
+        post_hooks=getattr(args, "post_hook", None) or [],
     )
     return 0
 
@@ -387,6 +651,7 @@ def _handle_watch(args, config, manager) -> int:
         while True:
             manager.execute_backups(
                 keep=args.keep,
+                keep_days=args.keep_days,
                 password=args.password,
                 sftp_upload=args.sftp,
                 webdav_upload=args.webdav,
@@ -401,6 +666,11 @@ def _handle_watch(args, config, manager) -> int:
                 if args.older_than
                 else 0,
                 incremental=args.incremental,
+                split_size=_parse_size(args.split) if args.split else 0,
+                tag=args.tag or "",
+                checksum=args.checksum,
+                pre_hooks=getattr(args, "pre_hook", None) or [],
+                post_hooks=getattr(args, "post_hook", None) or [],
             )
             _time.sleep(interval_sec)
     except KeyboardInterrupt:
@@ -413,15 +683,63 @@ def _handle_restore(args, config, manager) -> int:
 
         print(list_backup_contents(args.backup_file, args.password))
         return 0
-    result = restore_backup(args.backup_file, args.target_dir, args.password)
+    result = restore_backup(
+        args.backup_file,
+        args.target_dir,
+        args.password,
+        select_pattern=getattr(args, "select", "") or "",
+    )
     return 0 if result["success"] else 1
+
+
+def _handle_info(args, config, manager) -> int:
+    from sbackup.compression import get_backup_info, format_backup_info
+
+    info = get_backup_info(args.backup_file, args.password)
+    print(format_backup_info(info))
+    return 0 if info.get("success") else 1
+
+
+def _handle_diff(args, config, manager) -> int:
+    source = parse_path(args.source)
+    diff_result = manager.diff_backup(source, args.backup_file, args.password)
+    if not diff_result.get("success"):
+        return 1
+    print(manager.format_diff(diff_result))
+    has_changes = (
+        diff_result["added"] or diff_result["removed"] or diff_result["modified"]
+    )
+    return 1 if has_changes else 0
 
 
 def _handle_verify(args, config, manager) -> int:
-    from sbackup.compression import verify_backup
+    if args.fast:
+        # 快速验证：用历史 SHA256 比对，无需解压
+        sha256 = manager.find_checksum(args.backup_file)
+        if sha256:
+            from sbackup.compression import verify_backup_fast
 
-    result = verify_backup(args.backup_file, args.password)
-    return 0 if result["success"] else 1
+            result = verify_backup_fast(args.backup_file, sha256)
+            if result["success"]:
+                print(
+                    t("cmd.verify.fast_success", path=args.backup_file, sha256=sha256)
+                )
+                return 0
+            else:
+                print(t("cmd.verify.fast_failed", path=args.backup_file))
+                return 1
+        else:
+            print(t("cmd.verify.no_checksum", path=args.backup_file))
+            # 回退到完整验证
+            from sbackup.compression import verify_backup
+
+            result = verify_backup(args.backup_file, args.password)
+            return 0 if result["success"] else 1
+    else:
+        from sbackup.compression import verify_backup
+
+        result = verify_backup(args.backup_file, args.password)
+        return 0 if result["success"] else 1
 
 
 def _handle_sftp(args, config, manager) -> int:
@@ -434,6 +752,76 @@ def _handle_webdav(args, config, manager) -> int:
     from sbackup.handlers import handle_webdav
 
     return handle_webdav(args, config)
+
+
+def _handle_remote(args, config, manager) -> int:
+    """处理 remote 子命令"""
+    from sbackup.handlers import handle_remote
+
+    return handle_remote(args, config)
+
+
+def _handle_report(args, config, manager) -> int:
+    report = manager.export_report(args.output)
+    if not args.output:
+        print(report)
+    return 0
+
+
+def _handle_search(args, config, manager) -> int:
+    from pathlib import Path
+    from sbackup.compression import search_in_backup
+    from sbackup.auto_save import BackupEntry
+
+    if args.backup_file:
+        results = search_in_backup(args.backup_file, args.pattern, args.password)
+        if results:
+            print(t("cmd.search.results", path=args.backup_file, count=len(results)))
+            for r in results:
+                print(f"  {r}")
+        else:
+            print(
+                t("cmd.search.no_results", pattern=args.pattern, path=args.backup_file)
+            )
+        return 0 if results else 1
+
+    # 在所有策略的最新备份中搜索
+    total_found = 0
+    for key, raw in manager.data.items():
+        if key == "_history" or key == "_file_meta":
+            continue
+
+        entry = BackupEntry.from_list(raw)
+        target_dir = Path(entry.target)
+        if not target_dir.is_dir():
+            continue
+        patterns = [
+            "*.zip",
+            "*.tar",
+            "*.tar.gz",
+            "*.tar.bz2",
+            "*.tar.xz",
+            "*.tar.zst",
+            "*.7z",
+        ]
+        all_files = []
+        for pat in patterns:
+            all_files.extend(target_dir.glob(pat))
+        if not all_files:
+            continue
+        all_files.sort(key=lambda f: f.stat().st_mtime, reverse=True)
+        latest = str(all_files[0])
+        results = search_in_backup(latest, args.pattern, args.password)
+        if results:
+            print(t("cmd.search.results", path=latest, count=len(results)))
+            for r in results:
+                print(f"  {r}")
+            total_found += len(results)
+
+    if total_found == 0:
+        print(t("cmd.search.no_results_global", pattern=args.pattern))
+        return 1
+    return 0
 
 
 def _handle_export(args, config, manager) -> int:
@@ -456,8 +844,122 @@ def _handle_import(args, config, manager) -> int:
     return 0
 
 
+def _handle_ignore(args, config, manager) -> int:
+    if args.list_presets:
+        from sbackup.compression import IGNORE_PRESETS
+
+        print(t("cmd.ignore.available_presets"))
+        for name, patterns in IGNORE_PRESETS.items():
+            print(f"  {name:10s} ({len(patterns)} rules)")
+        return 0
+
+    from sbackup.compression import generate_ignore_content
+
+    content = generate_ignore_content(args.preset)
+    output_path = args.output
+
+    if os.path.exists(output_path):
+        confirm = input(t("cmd.ignore.overwrite", path=output_path))
+        if confirm.strip().lower() not in ("y", "yes", "是"):
+            print(t("cmd.ignore.cancelled"))
+            return 1
+
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write(content)
+    print(t("cmd.ignore.generated", path=output_path, preset=args.preset))
+    return 0
+
+
+def _handle_versions(args, config, manager) -> int:
+    source = parse_path(args.source) if args.source else ""
+    print(manager.format_versions(source))
+    return 0
+
+
+def _handle_schedule(args, config, manager) -> int:
+    from sbackup.handlers import handle_schedule
+
+    return handle_schedule(args, config)
+
+
+def _handle_webhook_cmd(args, config, manager) -> int:
+    if args.webhook_action == "preset":
+        from sbackup.config import setup_webhook_preset
+
+        template = setup_webhook_preset(args.name)
+        if template:
+            print(t("cmd.webhook.preset_set", name=args.name, template=template))
+            return 0
+        print(t("cmd.webhook.preset_unknown", name=args.name))
+        return 1
+    elif args.webhook_action == "list":
+        from sbackup.config import WEBHOOK_PRESETS
+
+        print(t("cmd.webhook.available_presets"))
+        for key, info in WEBHOOK_PRESETS.items():
+            print(f"  {key:10s} — {info['name']}")
+        return 0
+    print(t("cli.help.webhook_cmd.action"))
+    return 1
+
+
+def _handle_config_cmd(args, config, manager) -> int:
+    import getpass
+    from sbackup.config import encrypt_config, decrypt_config, is_config_encrypted
+
+    config_path = os.path.abspath("config.json")
+    if args.config_action == "lock":
+        if is_config_encrypted(config_path):
+            print(t("cmd.config.already_locked"))
+            return 1
+        password = args.password or getpass.getpass(
+            t("cmd.config.enter_password") + " "
+        )
+        if not password:
+            print(t("cmd.config.no_password"))
+            return 1
+        if encrypt_config(password, config_path):
+            print(t("cmd.config.locked"))
+            return 0
+        print(t("cmd.config.lock_failed"))
+        return 1
+    elif args.config_action == "unlock":
+        if not is_config_encrypted(config_path):
+            print(t("cmd.config.not_locked"))
+            return 0
+        password = args.password or getpass.getpass(
+            t("cmd.config.enter_password") + " "
+        )
+        if decrypt_config(password, config_path):
+            print(t("cmd.config.unlocked"))
+            return 0
+        print(t("cmd.config.wrong_password"))
+        return 1
+    print(t("cli.help.config_cmd.action"))
+    return 1
+
+
 def _handle_status(args, config, manager) -> int:
     print(manager.format_status())
+    return 0
+
+
+def _handle_clean(args, config, manager) -> int:
+    if args.keep <= 0 and args.keep_days <= 0:
+        print(t("cmd.clean.no_criteria"))
+        return 1
+    result = manager.clean_all_backups(
+        keep=args.keep, keep_days=args.keep_days, dry_run=args.dry_run
+    )
+    deleted = result["deleted"]
+    if not deleted:
+        print(t("cmd.clean.nothing"))
+        return 0
+    if args.dry_run:
+        print(t("cmd.clean.dry_run_header"))
+    for f in deleted:
+        print(f"  {' rm ' if not args.dry_run else '~~'} {f}")
+    print(t("cmd.clean.summary", count=len(deleted)))
     return 0
 
 
@@ -466,18 +968,30 @@ _COMMAND_HANDLERS: dict[str, callable] = {
     "add": _handle_add,
     "rm": _handle_rm,
     "remove": _handle_rm,
+    "edit": _handle_edit,
     "all": _handle_all,
     "list": _handle_list,
     "history": _handle_list,
     "save": _handle_save,
     "watch": _handle_watch,
     "restore": _handle_restore,
+    "info": _handle_info,
+    "diff": _handle_diff,
     "verify": _handle_verify,
     "sftp": _handle_sftp,
     "webdav": _handle_webdav,
+    "remote": _handle_remote,
     "export": _handle_export,
     "import": _handle_import,
     "status": _handle_status,
+    "ignore": _handle_ignore,
+    "versions": _handle_versions,
+    "schedule": _handle_schedule,
+    "webhook": _handle_webhook_cmd,
+    "config": _handle_config_cmd,
+    "report": _handle_report,
+    "search": _handle_search,
+    "clean": _handle_clean,
 }
 
 
@@ -508,9 +1022,9 @@ def run() -> int:
         if os.path.exists(config_path):
             print(t("cmd.init.exists", path=config_path))
             return 1
-        from sbackup.config import save_lang as _save_lang
+        from sbackup.config import generate_config_template
 
-        _save_lang("zh_CN", config_path)
+        generate_config_template(config_path)
         print(t("cmd.init.success", path=config_path))
         return 0
 

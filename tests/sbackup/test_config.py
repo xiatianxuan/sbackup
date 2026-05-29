@@ -5,6 +5,7 @@
 import unittest
 import os
 import tempfile
+import shutil
 import json
 from unittest.mock import patch
 from sbackup.config import load_config, save_lang, save_format, save_sftp_config
@@ -538,6 +539,107 @@ class TestJsonHelpers(unittest.TestCase):
         mock_open.side_effect = OSError("disk full")
         _save_json_file({"test": True}, self.config_file)
         # 不应抛出异常
+
+
+class TestGenerateConfigTemplate(unittest.TestCase):
+    """测试 generate_config_template"""
+
+    def setUp(self):
+        self.test_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.test_dir, ignore_errors=True)
+
+    def test_generate_template(self):
+        """测试生成完整配置模板"""
+        from sbackup.config import generate_config_template
+
+        config_file = os.path.join(self.test_dir, "config.json")
+        generate_config_template(config_file)
+        self.assertTrue(os.path.exists(config_file))
+        with open(config_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        self.assertIn("lang", data)
+        self.assertIn("compression_format", data)
+        self.assertIn("compression", data)
+        self.assertIn("sftp", data)
+        self.assertIn("webdav", data)
+        self.assertIn("webhook", data)
+        self.assertIn("skip_patterns", data)
+        self.assertEqual(data["lang"], "zh_CN")
+
+    def test_generate_template_webhook_structure(self):
+        """测试 webhook 配置结构"""
+        from sbackup.config import generate_config_template
+
+        config_file = os.path.join(self.test_dir, "config.json")
+        generate_config_template(config_file)
+        with open(config_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        webhook = data["webhook"]
+        self.assertIn("urls", webhook)
+        self.assertIn("template", webhook)
+        self.assertIn("retries", webhook)
+        self.assertIsInstance(webhook["urls"], list)
+
+
+class TestWebhookConfigLoading(unittest.TestCase):
+    """测试 webhook 配置加载的向后兼容性"""
+
+    def setUp(self):
+        self.test_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.test_dir, ignore_errors=True)
+
+    def test_load_legacy_webhook_url(self):
+        """测试加载旧版单个 url 字段"""
+        from sbackup.config import load_config
+
+        config_file = os.path.join(self.test_dir, "config.json")
+        with open(config_file, "w", encoding="utf-8") as f:
+            json.dump({"webhook": {"url": "https://example.com/hook"}}, f)
+        config = load_config(config_file)
+        self.assertEqual(config.webhook_url, "https://example.com/hook")
+        self.assertIn("https://example.com/hook", config.webhook_urls)
+
+    def test_load_webhook_urls_list(self):
+        """测试加载 urls 列表"""
+        from sbackup.config import load_config
+
+        config_file = os.path.join(self.test_dir, "config.json")
+        with open(config_file, "w", encoding="utf-8") as f:
+            json.dump(
+                {"webhook": {"urls": ["https://a.com", "https://b.com"], "retries": 3}},
+                f,
+            )
+        config = load_config(config_file)
+        self.assertEqual(len(config.webhook_urls), 2)
+        self.assertEqual(config.webhook_retries, 3)
+
+    def test_load_webhook_template(self):
+        """测试加载自定义模板"""
+        from sbackup.config import load_config
+
+        config_file = os.path.join(self.test_dir, "config.json")
+        with open(config_file, "w", encoding="utf-8") as f:
+            json.dump(
+                {"webhook": {"template": '{"event":"{status}"}'}},
+                f,
+            )
+        config = load_config(config_file)
+        self.assertEqual(config.webhook_template, '{"event":"{status}"}')
+
+    def test_load_empty_webhook(self):
+        """测试加载空 webhook 配置"""
+        from sbackup.config import load_config
+
+        config_file = os.path.join(self.test_dir, "config.json")
+        with open(config_file, "w", encoding="utf-8") as f:
+            json.dump({"webhook": {}}, f)
+        config = load_config(config_file)
+        self.assertEqual(config.webhook_urls, [])
+        self.assertEqual(config.webhook_retries, 2)
 
 
 if __name__ == "__main__":

@@ -232,6 +232,52 @@ class SFTPClient:
                 except SFTPError:
                     print(t("err.sftp.wrong_passphrase"))
 
+    def list_remote_files(self, remote_path: str = "/") -> list[dict]:
+        """
+        列出远程目录下的文件
+        :return: 包含 name, size, mtime 的字典列表
+        """
+        if self._sftp is None:
+            raise SFTPError(t("err.sftp.not_connected"))
+
+        remote_path = remote_path.replace("\\", "/").rstrip("/")
+        if not remote_path:
+            remote_path = "/"
+
+        try:
+            entries = self._sftp.listdir_attr(remote_path)
+        except FileNotFoundError:
+            raise SFTPError(t("err.sftp.remote_not_found", path=remote_path))
+
+        files = []
+        for entry in entries:
+            if entry.filename.startswith("."):
+                continue
+            # 跳过目录
+            if entry.st_mode is not None and entry.st_mode & 0o170000 == 0o040000:
+                continue
+            files.append(
+                {
+                    "name": entry.filename,
+                    "size": entry.st_size or 0,
+                    "mtime": entry.st_mtime or 0,
+                }
+            )
+        return files
+
+    def delete_remote_file(self, remote_path: str) -> None:
+        """删除远程文件"""
+        if self._sftp is None:
+            raise SFTPError(t("err.sftp.not_connected"))
+
+        try:
+            self._sftp.remove(remote_path)
+            logger.debug("SFTP 删除文件: %s", remote_path)
+        except FileNotFoundError:
+            raise SFTPError(t("err.sftp.remote_not_found", path=remote_path))
+        except OSError as e:
+            raise SFTPError(t("err.sftp.delete", path=remote_path, error=str(e)))
+
     def test_connection(self) -> bool:
         """测试 SFTP 连接是否可用"""
         try:

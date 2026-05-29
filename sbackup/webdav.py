@@ -137,6 +137,83 @@ class WebDAVClient:
         except OSError as e:
             raise WebDAVError(t("err.webdav.upload", path=remote_path, error=str(e)))
 
+    def list_remote_files(self, remote_path: str = "") -> list[dict]:
+        """
+        列出远程目录下的文件（PROPFIND）
+        :return: 包含 name, size, mtime 的字典列表
+        """
+        import xml.etree.ElementTree as ET
+
+        try:
+            body = (
+                '<?xml version="1.0"?>'
+                '<D:propfind xmlns:D="DAV:">'
+                "<D:allprop/>"
+                "</D:propfind>"
+            )
+            req = self._build_request(
+                "PROPFIND",
+                remote_path,
+                data=body.encode("utf-8"),
+                content_type="application/xml",
+            )
+            req.add_header("Depth", "1")
+            resp = urllib.request.urlopen(req, timeout=30)
+            xml_data = resp.read()
+        except urllib.error.HTTPError as e:
+            if e.code == 401:
+                raise WebDAVError(t("err.webdav.auth", host=self.url))
+            raise WebDAVError(t("err.webdav.list", path=remote_path, error=str(e)))
+        except OSError as e:
+            raise WebDAVError(t("err.webdav.list", path=remote_path, error=str(e)))
+
+        files = []
+        try:
+            root = ET.fromstring(xml_data)
+            ns = {"D": "DAV:"}
+            for resp_elem in root.findall(".//D:response", ns):
+                href = resp_elem.findtext("D:href", "", ns)
+                if not href:
+                    continue
+                # 跳过目录（有 resourcetype collection）
+                rt = resp_elem.find(".//D:resourcetype/D:collection", ns)
+                if rt is not None:
+                    continue
+                name = href.rstrip("/").split("/")[-1]
+                if not name:
+                    continue
+                size_text = resp_elem.findtext(".//D:getcontentlength", "0", ns)
+                mtime_text = resp_elem.findtext(".//D:getlastmodified", "", ns)
+                size = int(size_text) if size_text else 0
+                # 解析 HTTP 日期格式
+                mtime = 0.0
+                if mtime_text:
+                    try:
+                        from email.utils import parsedate_to_datetime
+
+                        mtime = parsedate_to_datetime(mtime_text).timestamp()
+                    except (ValueError, TypeError):
+                        mtime = 0.0
+                files.append({"name": name, "size": size, "mtime": mtime})
+        except ET.ParseError:
+            pass
+        return files
+
+    def delete_remote_file(self, remote_path: str) -> None:
+        """删除远程文件（DELETE）"""
+        try:
+            req = self._build_request("DELETE", remote_path)
+            urllib.request.urlopen(req, timeout=30)
+            logger.debug("WebDAV 删除文件: %s", remote_path)
+        except urllib.error.HTTPError as e:
+            if e.code == 401:
+                raise WebDAVError(t("err.webdav.auth", host=self.url))
+            if e.code == 404:
+                raise WebDAVError(t("err.webdav.not_found", path=remote_path))
+            raise WebDAVError(t("err.webdav.delete", path=remote_path, error=str(e)))
+        except OSError as e:
+            raise WebDAVError(t("err.webdav.delete", path=remote_path, error=str(e)))
+
     def test_connection(self) -> bool:
         """测试连接是否可用"""
         try:

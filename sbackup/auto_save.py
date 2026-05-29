@@ -175,6 +175,201 @@ class BackupManager:
         self.save()
         return True
 
+    def edit_strategy(
+        self,
+        source: str,
+        new_target: str | None = None,
+        new_ignore: str | None = None,
+        new_format: str | None = None,
+        new_name_template: str | None = None,
+    ) -> bool:
+        """
+        编辑已有备份策略的字段（仅修改指定的字段）
+        :param source: 源文件夹路径（用于定位策略）
+        :param new_target: 新的目标路径，None 表示不修改
+        :param new_ignore: 新的忽略模式（逗号分隔），None 表示不修改
+        :param new_format: 新的打包格式，None 表示不修改
+        :param new_name_template: 新的文件名模板，None 表示不修改
+        :return: 是否编辑成功
+        """
+        abs_path = os.path.abspath(source)
+        entry = self._get_entry(abs_path)
+        if entry is None:
+            print(t("warn.no.strategy.found", path=abs_path))
+            return False
+
+        changed = False
+        if new_target is not None:
+            abs_target = os.path.abspath(new_target)
+            if not os.path.isdir(abs_target):
+                print(t("err.dest.invalid", path=new_target))
+                return False
+            if abs_path == abs_target:
+                print(t("err.dest.invalid", path=new_target))
+                return False
+            entry.target = abs_target
+            changed = True
+        if new_ignore is not None:
+            entry.skip_patterns = [
+                s.strip() for s in new_ignore.split(",") if s.strip()
+            ]
+            changed = True
+        if new_format is not None:
+            entry.compression_format = new_format.upper().replace(".", "_")
+            changed = True
+        if new_name_template is not None:
+            entry.name_template = new_name_template
+            changed = True
+
+        if not changed:
+            print(t("cmd.edit.nothing"))
+            return False
+
+        self._set_entry(abs_path, entry)
+        self.save()
+        return True
+
+    def diff_backup(
+        self, source: str, backup_file: str | None = None, password: str = ""
+    ) -> dict:
+        """
+        对比源目录与最近一次备份的差异
+        :param source: 源文件夹路径
+        :param backup_file: 指定备份文件路径，None 则自动查找最新备份
+        :param password: 解密密码
+        :return: 包含 added/removed/modified 列表的字典
+        """
+        from sbackup.compression import get_archive_member_set
+
+        abs_source = os.path.abspath(source)
+        entry = self._get_entry(abs_source)
+
+        # 确定备份文件
+        if backup_file:
+            if not os.path.isfile(backup_file):
+                print(t("err.file.not_found", path=backup_file))
+                return {"success": False}
+            target_backup = backup_file
+        elif entry:
+            target_dir = Path(entry.target)
+            if not target_dir.is_dir():
+                print(t("err.dest.invalid", path=entry.target))
+                return {"success": False}
+            # 查找最新的备份文件
+            patterns = [
+                "*.zip",
+                "*.tar",
+                "*.tar.gz",
+                "*.tar.bz2",
+                "*.tar.xz",
+                "*.tar.zst",
+                "*.7z",
+            ]
+            all_files = []
+            for pat in patterns:
+                all_files.extend(target_dir.glob(pat))
+            if not all_files:
+                print(t("cmd.diff.no_backup", path=entry.target))
+                return {"success": False}
+            all_files.sort(key=lambda f: f.stat().st_mtime, reverse=True)
+            target_backup = str(all_files[0])
+        else:
+            print(t("warn.no.strategy.found", path=abs_source))
+            return {"success": False}
+
+        if not os.path.isdir(abs_source):
+            print(t("err.folder.invalid", path=abs_source))
+            return {"success": False}
+
+        # 获取备份中的文件集合
+        backup_files = get_archive_member_set(target_backup, password)
+        if not backup_files:
+            print(t("cmd.diff.empty_backup", path=target_backup))
+            return {"success": False}
+
+        # 收集当前源目录的文件集合（复用忽略逻辑）
+        from sbackup.compression import create_compressor
+
+        skip_patterns = entry.skip_patterns if entry else [".git", "__pycache__"]
+        cfg = Config(
+            folder_path=abs_source,
+            skip_patterns=skip_patterns,
+        )
+        compressor = create_compressor(cfg)
+        current_files_raw = compressor._collect_files(Path(abs_source))
+        source_name = Path(abs_source).name
+        current_files = set()
+        for dirpath, filename in current_files_raw:
+            file_path = Path(dirpath) / filename
+            arcname = str(
+                source_name / file_path.relative_to(Path(abs_source))
+            ).replace("\\", "/")
+            current_files.add(arcname)
+
+        # 计算差异
+        added = sorted(current_files - backup_files)
+        removed = sorted(backup_files - current_files)
+        common = current_files & backup_files
+        modified = []
+        # 用备份文件的修改时间作为基准，源文件更新则视为已修改
+        backup_mtime = Path(target_backup).stat().st_mtime
+        for rel_path in sorted(common):
+            src_file = (
+                Path(abs_source) / rel_path.split("/", 1)[-1]
+                if "/" in rel_path
+                else Path(abs_source) / rel_path
+            )
+            try:
+                if src_file.is_file() and src_file.stat().st_mtime > backup_mtime:
+                    modified.append(rel_path)
+            except OSError:
+                pass
+
+        return {
+            "success": True,
+            "backup_file": target_backup,
+            "added": added,
+            "removed": removed,
+            "modified": modified,
+        }
+
+    def format_diff(self, diff_result: dict) -> str:
+        """将 diff 结果格式化为可读文本"""
+        if not diff_result.get("success"):
+            return ""
+
+        lines = [t("cmd.diff.header", backup=diff_result["backup_file"])]
+
+        added = diff_result["added"]
+        removed = diff_result["removed"]
+        modified = diff_result["modified"]
+
+        if added:
+            lines.append(t("cmd.diff.added_header", count=len(added)))
+            for f in added:
+                lines.append(f"  + {f}")
+        if removed:
+            lines.append(t("cmd.diff.removed_header", count=len(removed)))
+            for f in removed:
+                lines.append(f"  - {f}")
+        if modified:
+            lines.append(t("cmd.diff.modified_header", count=len(modified)))
+            for f in modified:
+                lines.append(f"  ~ {f}")
+
+        if not added and not removed and not modified:
+            lines.append(t("cmd.diff.no_changes"))
+
+        lines.append(
+            t(
+                "cmd.diff.summary",
+                added=len(added),
+                removed=len(removed),
+                modified=len(modified),
+            )
+        )
+        return "\n".join(lines)
+
     def rm_folder(self, folder_path: str) -> bool:
         """
         删除备份策略
@@ -191,6 +386,7 @@ class BackupManager:
     def execute_backups(
         self,
         keep: int = 0,
+        keep_days: int = 0,
         password: str = "",
         sftp_upload: bool = False,
         webdav_upload: bool = False,
@@ -203,10 +399,16 @@ class BackupManager:
         min_size: int = 0,
         max_age_seconds: float = 0,
         incremental: bool = False,
+        split_size: int = 0,
+        tag: str = "",
+        checksum: bool = False,
+        pre_hooks: list[str] | None = None,
+        post_hooks: list[str] | None = None,
     ):
         """
         执行所有备份策略
         :param keep: 保留最近 N 个备份文件，0 表示不清理
+        :param keep_days: 保留最近 N 天的备份文件，0 表示不按时间清理
         :param password: 加密密码（仅 7z 格式支持）
         :param sftp_upload: 是否在备份后上传到 SFTP 服务器
         :param webdav_upload: 是否在备份后上传到 WebDAV 服务器
@@ -219,9 +421,14 @@ class BackupManager:
         :param min_size: 文件大小下限（字节），0 不限制
         :param max_age_seconds: 文件年龄上限（秒），0 不限制
         :param incremental: 文件级增量备份（仅压缩变化的文件）
+        :param pre_hooks: 备份前执行的命令列表
+        :param post_hooks: 备份后执行的命令列表
         """
         config = load_config()
         start_time = time.monotonic()
+
+        # 执行前置钩子
+        self._run_hooks(pre_hooks or [], "pre")
 
         # 加载文件级元数据（增量备份用）
         file_meta_all = self.data.get("_file_meta", {}) if incremental else {}
@@ -256,6 +463,7 @@ class BackupManager:
                         min_size,
                         max_age_seconds,
                         file_meta,
+                        split_size,
                     )
                 )
             else:
@@ -278,7 +486,9 @@ class BackupManager:
                     executor.submit(self._do_backup, *task): task for task in tasks
                 }
                 for future in as_completed(futures):
-                    key, entry, current_mtime, _, _, _, _, _, _, _, _ = futures[future]
+                    key, entry, current_mtime, _, _, _, _, _, _, _, _, _ = futures[
+                        future
+                    ]
                     try:
                         result = future.result()
                     except Exception as e:
@@ -292,13 +502,15 @@ class BackupManager:
                             result["size_mb"],
                             result["files_count"],
                             result.get("original_size_mb", 0.0),
+                            result.get("path", ""),
+                            tag=tag,
                         )
                         if incremental:
                             self.data.setdefault("_file_meta", {})[key] = (
-                                self._collect_file_meta(key)
+                                self._collect_file_meta(key, checksum=checksum)
                             )
-                        if keep > 0:
-                            self._cleanup_old_backups(entry.target, keep)
+                        if keep > 0 or keep_days > 0:
+                            self._cleanup_old_backups(entry.target, keep, keep_days)
                         backup_count += 1
                         if sftp_upload and result.get("path"):
                             uploaded_files.append(result["path"])
@@ -319,9 +531,21 @@ class BackupManager:
                 mn,
                 age,
                 fmeta,
+                split,
             ) in tasks:
                 result = self._do_backup(
-                    key, entry, current_mtime, cfg, pwd, tpl, sym, mx, mn, age, fmeta
+                    key,
+                    entry,
+                    current_mtime,
+                    cfg,
+                    pwd,
+                    tpl,
+                    sym,
+                    mx,
+                    mn,
+                    age,
+                    fmeta,
+                    split,
                 )
                 if result and result.get("success"):
                     entry.mtime = current_mtime
@@ -331,13 +555,15 @@ class BackupManager:
                         result["size_mb"],
                         result["files_count"],
                         result.get("original_size_mb", 0.0),
+                        result.get("path", ""),
+                        tag=tag,
                     )
                     if incremental:
                         self.data.setdefault("_file_meta", {})[key] = (
-                            self._collect_file_meta(key)
+                            self._collect_file_meta(key, checksum=checksum)
                         )
-                    if keep > 0:
-                        self._cleanup_old_backups(entry.target, keep)
+                    if keep > 0 or keep_days > 0:
+                        self._cleanup_old_backups(entry.target, keep, keep_days)
                     backup_count += 1
                     if sftp_upload and result.get("path"):
                         uploaded_files.append(result["path"])
@@ -378,20 +604,66 @@ class BackupManager:
         if webdav_upload and uploaded_files:
             self._upload_to_webdav(uploaded_files, config)
 
-        # Webhook 通知
-        effective_webhook = webhook_url or getattr(config, "webhook_url", "")
-        if effective_webhook:
+        # Webhook 通知（支持多个 URL、自定义模板、重试）
+        all_webhook_urls = list(getattr(config, "webhook_urls", []))
+        # CLI --webhook 参数追加到列表（支持字符串或列表）
+        if webhook_url:
+            urls_from_cli = (
+                webhook_url if isinstance(webhook_url, list) else [webhook_url]
+            )
+            for u in urls_from_cli:
+                if u and u not in all_webhook_urls:
+                    all_webhook_urls.append(u)
+        # 向后兼容：单个 webhook_url 配置
+        legacy_url = getattr(config, "webhook_url", "")
+        if legacy_url and legacy_url not in all_webhook_urls:
+            all_webhook_urls.append(legacy_url)
+
+        if all_webhook_urls:
             status = "success" if verify_failures == 0 else "partial"
             if backup_count == 0:
                 status = "skipped"
-            self._send_webhook(
-                effective_webhook,
+            self._send_webhooks(
+                all_webhook_urls,
                 status=status,
                 backed=backup_count,
                 skipped=skip_count,
                 elapsed=elapsed,
                 verify_failures=verify_failures,
+                template=getattr(config, "webhook_template", ""),
+                retries=getattr(config, "webhook_retries", 2),
             )
+
+        # 执行后置钩子
+        self._run_hooks(post_hooks or [], "post")
+
+    @staticmethod
+    def _run_hooks(hooks: list[str], hook_type: str) -> None:
+        """执行钩子命令列表
+        :param hooks: 命令列表
+        :param hook_type: "pre" 或 "post"，用于日志标识
+        """
+        import subprocess
+
+        for cmd in hooks:
+            if not cmd:
+                continue
+            label = f"cmd.hook.{hook_type}_running"
+            print(t(label, command=cmd))
+            try:
+                result = subprocess.run(
+                    cmd, shell=True, timeout=300, capture_output=True, text=True
+                )
+                if result.returncode != 0:
+                    logger.warning(
+                        t("cmd.hook.failed", command=cmd, error=result.stderr.strip())
+                    )
+            except subprocess.TimeoutExpired:
+                logger.warning(
+                    t("cmd.hook.failed", command=cmd, error="timeout (300s)")
+                )
+            except OSError as e:
+                logger.warning(t("cmd.hook.failed", command=cmd, error=str(e)))
 
     @staticmethod
     def _do_backup(
@@ -406,6 +678,7 @@ class BackupManager:
         min_size: int = 0,
         max_age_seconds: float = 0,
         file_metadata: dict | None = None,
+        split_size: int = 0,
     ) -> dict:
         """执行单个备份策略（线程安全）"""
         fmt = entry.compression_format or config.compression_format
@@ -437,11 +710,26 @@ class BackupManager:
 
             encrypted_path = _encrypt_file(result["path"], password)
             result["path"] = encrypted_path
+        # 分卷：压缩完成后按大小分割
+        if split_size > 0 and result.get("success") and result.get("path"):
+            from sbackup.compression import split_file
+
+            parts = split_file(result["path"], split_size)
+            if len(parts) > 1:
+                result["parts"] = parts
+                result["split_count"] = len(parts)
+                logger.debug("分卷完成: %d 个分卷", len(parts))
         return result
 
     @staticmethod
-    def _collect_file_meta(source_path: str) -> dict[str, list]:
-        """收集源目录下所有文件的元数据 {rel_path: [mtime, size]}"""
+    def _collect_file_meta(
+        source_path: str, checksum: bool = False
+    ) -> dict[str, list | str]:
+        """收集源目录下所有文件的元数据
+        :param checksum: True 时存储 SHA256，False 时存储 [mtime, size]
+        """
+        import hashlib
+
         meta = {}
         source = Path(source_path)
         if not source.is_dir():
@@ -458,8 +746,19 @@ class BackupManager:
                         else filename
                     )
                     try:
-                        stat = (Path(dirpath) / filename).stat()
-                        meta[file_rel] = [stat.st_mtime, stat.st_size]
+                        file_path = Path(dirpath) / filename
+                        if checksum:
+                            sha = hashlib.sha256()
+                            with open(file_path, "rb") as f:
+                                while True:
+                                    chunk = f.read(65536)
+                                    if not chunk:
+                                        break
+                                    sha.update(chunk)
+                            meta[file_rel] = sha.hexdigest()
+                        else:
+                            stat = file_path.stat()
+                            meta[file_rel] = [stat.st_mtime, stat.st_size]
                     except OSError:
                         pass
         except OSError:
@@ -501,7 +800,7 @@ class BackupManager:
         print(t("cmd.dry_run.header"))
         total_files = 0
         total_size = 0.0
-        for key, entry, _, _, _, _ in tasks:
+        for key, entry, *_rest in tasks:
             fmt = entry.compression_format or config.compression_format
             cfg = Config(
                 folder_path=key,
@@ -556,49 +855,108 @@ class BackupManager:
         skipped: int,
         elapsed: float,
         verify_failures: int = 0,
+        template: str = "",
+        retries: int = 2,
     ) -> None:
-        """POST 备份结果到 webhook URL"""
+        """POST 备份结果到单个 webhook URL，支持自定义模板和重试"""
         import urllib.request
         import urllib.error
+        import time as _time
         from datetime import datetime
 
-        payload = json.dumps(
-            {
-                "status": status,
-                "timestamp": datetime.now().isoformat(timespec="seconds"),
-                "backed": backed,
-                "skipped": skipped,
-                "elapsed_seconds": round(elapsed, 2),
-                "verify_failures": verify_failures,
-            },
-            ensure_ascii=False,
-        ).encode("utf-8")
+        variables = {
+            "status": status,
+            "timestamp": datetime.now().isoformat(timespec="seconds"),
+            "backed": str(backed),
+            "skipped": str(skipped),
+            "elapsed": f"{elapsed:.2f}",
+            "verify_failures": str(verify_failures),
+        }
 
-        try:
-            req = urllib.request.Request(
-                url,
-                data=payload,
-                method="POST",
-                headers={"Content-Type": "application/json"},
-            )
-            urllib.request.urlopen(req, timeout=10)
-            logger.debug("Webhook 通知成功: %s", url)
-        except (urllib.error.URLError, OSError) as e:
-            logger.warning("Webhook 通知失败: %s — %s", url, e)
+        if template:
+            try:
+                payload = template.format(**variables).encode("utf-8")
+            except (KeyError, ValueError):
+                payload = json.dumps(variables, ensure_ascii=False).encode("utf-8")
+        else:
+            payload = json.dumps(
+                {
+                    "status": status,
+                    "timestamp": variables["timestamp"],
+                    "backed": backed,
+                    "skipped": skipped,
+                    "elapsed_seconds": round(elapsed, 2),
+                    "verify_failures": verify_failures,
+                },
+                ensure_ascii=False,
+            ).encode("utf-8")
+
+        max_attempts = max(retries, 1)
+        for attempt in range(max_attempts):
+            try:
+                req = urllib.request.Request(
+                    url,
+                    data=payload,
+                    method="POST",
+                    headers={"Content-Type": "application/json"},
+                )
+                urllib.request.urlopen(req, timeout=10)
+                logger.debug("Webhook 通知成功: %s", url)
+                return
+            except (urllib.error.URLError, OSError) as e:
+                if attempt < max_attempts - 1:
+                    wait = 2**attempt
+                    logger.debug(
+                        "Webhook 重试 %d/%d (%ds后): %s",
+                        attempt + 1,
+                        max_attempts,
+                        wait,
+                        url,
+                    )
+                    _time.sleep(wait)
+                else:
+                    logger.warning("Webhook 通知失败: %s — %s", url, e)
+
+    @staticmethod
+    def _send_webhooks(
+        urls: list[str],
+        *,
+        status: str,
+        backed: int,
+        skipped: int,
+        elapsed: float,
+        verify_failures: int = 0,
+        template: str = "",
+        retries: int = 2,
+    ) -> None:
+        """POST 备份结果到多个 webhook URL"""
+        for url in urls:
+            if url:
+                BackupManager._send_webhook(
+                    url,
+                    status=status,
+                    backed=backed,
+                    skipped=skipped,
+                    elapsed=elapsed,
+                    verify_failures=verify_failures,
+                    template=template,
+                    retries=retries,
+                )
 
     # 向后兼容别名
     save_folder = execute_backups
 
     @staticmethod
     def _upload_to_sftp(file_paths: list[str], config: Config) -> None:
-        """将备份文件上传到 SFTP 服务器"""
+        """将备份文件上传到 SFTP 服务器（多文件并行）"""
+        from concurrent.futures import ThreadPoolExecutor, as_completed
         from sbackup.sftp import SFTPClient, SFTPError
 
         if not config.sftp_enabled or not config.sftp_host:
             print(t("err.sftp.not_configured"))
             return
 
-        # 获取认证凭据：优先使用配置中的私钥，否则尝试默认私钥
+        # 获取认证凭据
         key_file = config.sftp_key_file
         key_passphrase = config.sftp_key_passphrase
         password = config.sftp_password
@@ -623,68 +981,114 @@ class BackupManager:
                 password = config.sftp_password
                 key_passphrase = ""
 
-        try:
-            with SFTPClient(
-                config.sftp_host,
-                config.sftp_port,
-                config.sftp_user,
-                password,
-                key_file,
-                key_passphrase,
-            ) as client:
-                for local_path in file_paths:
-                    filename = os.path.basename(local_path)
-                    file_size = os.path.getsize(local_path)
-                    print(t("cmd.sftp.uploading", file=filename))
-                    try:
-                        from tqdm import tqdm as tqdm_cls
+        def _upload_single(local_path: str) -> tuple[str, bool, str]:
+            """单文件上传（线程安全，每个线程独立连接）"""
+            filename = os.path.basename(local_path)
+            try:
+                with SFTPClient(
+                    config.sftp_host,
+                    config.sftp_port,
+                    config.sftp_user,
+                    password,
+                    key_file,
+                    key_passphrase,
+                ) as client:
+                    client.upload_file(local_path, config.sftp_remote_path)
+                return filename, True, ""
+            except SFTPError as e:
+                return filename, False, str(e)
 
-                        with tqdm_cls(
-                            total=file_size,
-                            unit="B",
-                            unit_scale=True,
-                            desc=t("cmd.sftp.progress"),
-                        ) as pbar:
-                            client.upload_file(
-                                local_path,
-                                config.sftp_remote_path,
-                                progress_callback=lambda sent, total: pbar.update(
-                                    sent - pbar.n
-                                ),
-                            )
+        if len(file_paths) == 1:
+            # 单文件直接上传（带进度条）
+            local_path = file_paths[0]
+            filename = os.path.basename(local_path)
+            file_size = os.path.getsize(local_path)
+            print(t("cmd.sftp.uploading", file=filename))
+            try:
+                from tqdm import tqdm as tqdm_cls
+
+                with SFTPClient(
+                    config.sftp_host,
+                    config.sftp_port,
+                    config.sftp_user,
+                    password,
+                    key_file,
+                    key_passphrase,
+                ) as client:
+                    with tqdm_cls(
+                        total=file_size,
+                        unit="B",
+                        unit_scale=True,
+                        desc=t("cmd.sftp.progress"),
+                    ) as pbar:
+                        client.upload_file(
+                            local_path,
+                            config.sftp_remote_path,
+                            progress_callback=lambda sent, total: pbar.update(
+                                sent - pbar.n
+                            ),
+                        )
+                print(t("cmd.sftp.success", file=filename))
+            except SFTPError as e:
+                print(str(e))
+        else:
+            # 多文件并行上传
+            print(t("cmd.sftp.parallel_upload", count=len(file_paths)))
+            with ThreadPoolExecutor(max_workers=min(len(file_paths), 4)) as executor:
+                futures = {executor.submit(_upload_single, fp): fp for fp in file_paths}
+                for future in as_completed(futures):
+                    filename, success, error = future.result()
+                    if success:
                         print(t("cmd.sftp.success", file=filename))
-                    except SFTPError as e:
-                        print(str(e))
-        except SFTPError as e:
-            print(str(e))
+                    else:
+                        print(error)
 
     @staticmethod
     def _upload_to_webdav(file_paths: list[str], config: Config) -> None:
-        """将备份文件上传到 WebDAV 服务器"""
+        """将备份文件上传到 WebDAV 服务器（多文件并行）"""
+        from concurrent.futures import ThreadPoolExecutor, as_completed
         from sbackup.webdav import WebDAVClient, WebDAVError
 
         if not config.webdav_enabled or not config.webdav_url:
             print(t("err.webdav.not_configured"))
             return
 
-        try:
-            client = WebDAVClient(
-                config.webdav_url,
-                config.webdav_user,
-                config.webdav_password,
-            )
-            client.connect()
+        def _upload_single(local_path: str) -> tuple[str, bool, str]:
+            filename = os.path.basename(local_path)
+            try:
+                client = WebDAVClient(
+                    config.webdav_url,
+                    config.webdav_user,
+                    config.webdav_password,
+                )
+                client.connect()
+                remote_path = config.webdav_remote_path.rstrip("/") + "/" + filename
+                client.upload_file(local_path, remote_path)
+                return filename, True, ""
+            except WebDAVError as e:
+                return filename, False, str(e)
+
+        if len(file_paths) <= 1:
+            # 单文件直接上传
             for local_path in file_paths:
                 filename = os.path.basename(local_path)
                 print(t("cmd.webdav.uploading", file=filename))
-                try:
-                    remote_path = config.webdav_remote_path.rstrip("/") + "/" + filename
-                    client.upload_file(local_path, remote_path)
+                _, success, error = _upload_single(local_path)
+                if success:
                     print(t("cmd.webdav.success", file=filename))
-                except WebDAVError as e:
-                    print(str(e))
-        except WebDAVError as e:
-            print(str(e))
+                else:
+                    print(error)
+        else:
+            # 多文件并行上传
+            print(t("cmd.webdav.parallel_upload", count=len(file_paths)))
+            with ThreadPoolExecutor(max_workers=min(len(file_paths), 4)) as executor:
+                futures = {executor.submit(_upload_single, fp): fp for fp in file_paths}
+                for future in as_completed(futures):
+                    filename, success, error = future.result()
+                    if success:
+                        print(t("cmd.webdav.success", file=filename))
+                    else:
+                        print(error)
 
     def _add_history(
         self,
@@ -692,8 +1096,11 @@ class BackupManager:
         size_mb: float,
         files_count: int,
         original_size_mb: float = 0.0,
+        backup_path: str = "",
+        tag: str = "",
     ):
-        """记录备份历史"""
+        """记录备份历史（可选存储 SHA256 校验和和标签）"""
+        import hashlib
         from datetime import datetime
 
         history = self.data.setdefault(_HISTORY_KEY, [])
@@ -703,6 +1110,8 @@ class BackupManager:
             "size_mb": round(size_mb, 2),
             "files_count": files_count,
         }
+        if tag:
+            entry["tag"] = tag
         if original_size_mb > 0:
             entry["original_size_mb"] = round(original_size_mb, 2)
             entry["ratio"] = (
@@ -710,6 +1119,19 @@ class BackupManager:
                 if original_size_mb > 0
                 else 0
             )
+        # 计算并存储 SHA256 校验和
+        if backup_path and os.path.isfile(backup_path):
+            try:
+                sha256 = hashlib.sha256()
+                with open(backup_path, "rb") as f:
+                    while True:
+                        chunk = f.read(65536)
+                        if not chunk:
+                            break
+                        sha256.update(chunk)
+                entry["sha256"] = sha256.hexdigest()
+            except OSError:
+                pass
         history.append(entry)
         # 保留最近 100 条记录
         if len(history) > 100:
@@ -718,6 +1140,71 @@ class BackupManager:
     def get_history(self) -> list[dict]:
         """获取备份历史记录"""
         return self.data.get(_HISTORY_KEY, [])
+
+    def find_checksum(self, backup_path: str) -> str:
+        """从历史记录中查找备份文件的 SHA256 校验和
+        :param backup_path: 备份文件路径
+        :return: SHA256 校验和，未找到返回空字符串
+        """
+        abs_path = os.path.abspath(backup_path)
+        for entry in reversed(self.data.get(_HISTORY_KEY, [])):
+            sha = entry.get("sha256", "")
+            if not sha:
+                continue
+            # 匹配路径或文件名
+            if entry.get("source") == abs_path:
+                return sha
+        # 回退：查找最近一条有 sha256 的记录
+        for entry in reversed(self.data.get(_HISTORY_KEY, [])):
+            sha = entry.get("sha256", "")
+            if sha:
+                return sha
+        return ""
+
+    def get_versions(self, source: str = "") -> dict[str, list[dict]]:
+        """获取备份版本列表，按源目录分组
+        :param source: 指定源目录路径，空字符串表示全部
+        :return: {source_path: [version_entries]}
+        """
+        history = self.get_history()
+        versions: dict[str, list[dict]] = {}
+        for entry in history:
+            src = entry.get("source", "")
+            if source and src != os.path.abspath(source):
+                continue
+            versions.setdefault(src, []).append(entry)
+        # 每个源的版本按时间倒序
+        for src in versions:
+            versions[src].sort(key=lambda e: e.get("time", ""), reverse=True)
+        return versions
+
+    def format_versions(self, source: str = "") -> str:
+        """格式化版本列表为可读文本"""
+        versions = self.get_versions(source)
+        if not versions:
+            return t("cmd.versions.empty")
+
+        lines = [t("cmd.versions.header")]
+        for src, entries in versions.items():
+            lines.append("")
+            lines.append(t("cmd.versions.source", source=src))
+            for i, entry in enumerate(entries, 1):
+                time_str = entry.get("time", "N/A")
+                size = entry.get("size_mb", 0)
+                files = entry.get("files_count", 0)
+                ratio = entry.get("ratio")
+                sha = entry.get("sha256", "")
+                ratio_str = f"{ratio:.0f}%" if isinstance(ratio, (int, float)) else "-"
+                sha_short = sha[:12] + "..." if sha else "-"
+                tag_str = f"  [{entry['tag']}]" if entry.get("tag") else ""
+                lines.append(
+                    f"  #{i}  {time_str}  {size:>8.2f} MB  {files:>5} files  "
+                    f"{ratio_str:>5}  {sha_short}{tag_str}"
+                )
+        lines.append("")
+        total = sum(len(e) for e in versions.values())
+        lines.append(t("cmd.versions.total", count=total, sources=len(versions)))
+        return "\n".join(lines)
 
     def format_history_table(self) -> str:
         """生成备份历史的对齐文本表格"""
@@ -749,9 +1236,16 @@ class BackupManager:
         return self._render_table(headers, rows)
 
     @staticmethod
-    def _cleanup_old_backups(target_dir: str, keep: int):
-        """清理旧备份文件，仅保留最近 keep 个（keep=0 时不清理）"""
-        if keep <= 0:
+    def _cleanup_old_backups(
+        target_dir: str, keep: int = 0, keep_days: int = 0
+    ) -> None:
+        """清理旧备份文件
+        :param keep: 保留最近 N 个备份文件，0 表示不按数量清理
+        :param keep_days: 保留最近 N 天的备份文件，0 表示不按时间清理
+        """
+        import time as _time
+
+        if keep <= 0 and keep_days <= 0:
             return
 
         target = Path(target_dir)
@@ -770,22 +1264,112 @@ class BackupManager:
         files = []
         for pat in patterns:
             files.extend(target.glob(pat))
-        if len(files) <= keep:
-            return
-        # 按修改时间排序，删除旧的
-        files.sort(key=lambda f: f.stat().st_mtime, reverse=True)
-        for old_file in files[keep:]:
+
+        to_delete: set[Path] = set()
+
+        # 按数量清理
+        if keep > 0 and len(files) > keep:
+            sorted_by_time = sorted(
+                files, key=lambda f: f.stat().st_mtime, reverse=True
+            )
+            to_delete.update(sorted_by_time[keep:])
+
+        # 按时间清理
+        if keep_days > 0:
+            cutoff = _time.time() - keep_days * 86400
+            for f in files:
+                try:
+                    if f.stat().st_mtime < cutoff:
+                        to_delete.add(f)
+                except OSError:
+                    pass
+
+        for old_file in to_delete:
             try:
                 old_file.unlink()
                 logger.debug(t("log.cleanup.delete"), old_file)
             except OSError:
                 pass
 
+    def clean_all_backups(
+        self, keep: int = 0, keep_days: int = 0, dry_run: bool = False
+    ) -> dict:
+        """清理所有策略的备份文件
+        :param keep: 每个策略保留最近 N 个，0 不按数量清理
+        :param keep_days: 删除 N 天前的文件，0 不按时间清理
+        :param dry_run: 仅预览不删除
+        :return: {deleted: [...], kept: [...]}
+        """
+        import time as _time
+
+        if keep <= 0 and keep_days <= 0:
+            return {"deleted": [], "kept": []}
+
+        patterns = [
+            "*.zip",
+            "*.tar",
+            "*.tar.gz",
+            "*.tar.bz2",
+            "*.tar.xz",
+            "*.tar.zst",
+            "*.7z",
+        ]
+
+        # 收集所有策略的目标目录
+        target_dirs: set[str] = set()
+        for key, raw in self.data.items():
+            if key in (_HISTORY_KEY, "_file_meta"):
+                continue
+            entry = BackupEntry.from_list(raw)
+            if entry.target:
+                target_dirs.add(entry.target)
+
+        deleted = []
+        kept = []
+        for target_dir in target_dirs:
+            target = Path(target_dir)
+            if not target.is_dir():
+                continue
+            files = []
+            for pat in patterns:
+                files.extend(target.glob(pat))
+
+            to_delete: set[Path] = set()
+            if keep > 0 and len(files) > keep:
+                sorted_by_time = sorted(
+                    files, key=lambda f: f.stat().st_mtime, reverse=True
+                )
+                to_delete.update(sorted_by_time[keep:])
+            if keep_days > 0:
+                cutoff = _time.time() - keep_days * 86400
+                for f in files:
+                    try:
+                        if f.stat().st_mtime < cutoff:
+                            to_delete.add(f)
+                    except OSError:
+                        pass
+
+            for f in files:
+                if f in to_delete:
+                    size_mb = f.stat().st_size / (1024 * 1024)
+                    if dry_run:
+                        deleted.append(f"[dry-run] {f} ({size_mb:.2f} MB)")
+                    else:
+                        try:
+                            f.unlink()
+                            deleted.append(f"{f} ({size_mb:.2f} MB)")
+                        except OSError:
+                            kept.append(str(f))
+                else:
+                    kept.append(str(f))
+
+        return {"deleted": deleted, "kept": kept}
+
     def export_strategies(self, output_file: str) -> int:
         """导出所有备份策略到 JSON 文件，返回导出的策略数"""
         export_data = {}
         for key, raw in self.data.items():
-            if key == _HISTORY_KEY:
+            if key in (_HISTORY_KEY, "_file_meta"):
                 continue
             export_data[key] = raw
         data_dir = os.path.dirname(output_file)
@@ -825,7 +1409,9 @@ class BackupManager:
         lines = [t("cmd.status.header")]
 
         # 统计策略数
-        strategies = {k: v for k, v in self.data.items() if k != _HISTORY_KEY}
+        strategies = {
+            k: v for k, v in self.data.items() if k not in (_HISTORY_KEY, "_file_meta")
+        }
         lines.append(t("cmd.status.strategies", count=len(strategies)))
 
         # 统计历史记录
@@ -869,9 +1455,16 @@ class BackupManager:
             # 计算目标目录大小
             target_path = Path(entry.target)
             if target_path.is_dir():
-                dir_size = sum(
-                    f.stat().st_size for f in target_path.rglob("*") if f.is_file()
-                )
+                dir_size = 0
+                try:
+                    for f in target_path.rglob("*"):
+                        try:
+                            if f.is_file():
+                                dir_size += f.stat().st_size
+                        except OSError:
+                            pass
+                except OSError:
+                    pass
                 lines.append(
                     t("cmd.status.strategy.size", size=dir_size / (1024 * 1024))
                 )
@@ -888,7 +1481,7 @@ class BackupManager:
         return {
             key: BackupEntry.from_list(raw).target
             for key, raw in self.data.items()
-            if key != _HISTORY_KEY
+            if key not in (_HISTORY_KEY, "_file_meta")
         }
 
     @staticmethod
@@ -925,7 +1518,9 @@ class BackupManager:
         """
         生成对齐的文本表格
         """
-        non_history_keys = [k for k in self.data if k != _HISTORY_KEY]
+        non_history_keys = [
+            k for k in self.data if k not in (_HISTORY_KEY, "_file_meta")
+        ]
         if not non_history_keys:
             return t("cmd.all.empty")
 
@@ -937,7 +1532,7 @@ class BackupManager:
         ]
         rows = []
         for path, raw in self.data.items():
-            if path == _HISTORY_KEY:
+            if path in (_HISTORY_KEY, "_file_meta"):
                 continue
             entry = BackupEntry.from_list(raw)
             fmt_display = (
@@ -953,3 +1548,74 @@ class BackupManager:
             rows.append([path, entry.target, fmt_display, skip])
 
         return self._render_table(headers, rows)
+
+    def export_report(self, output_file: str = "") -> str:
+        """生成 Markdown 格式的备份报告
+        :param output_file: 输出文件路径，空字符串则返回文本
+        :return: 报告文本
+        """
+        from datetime import datetime
+
+        lines = ["# Sbackup 备份报告", ""]
+        lines.append(f"**生成时间**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        lines.append("")
+
+        # 策略统计
+        strategies = {
+            k: v for k, v in self.data.items() if k not in (_HISTORY_KEY, "_file_meta")
+        }
+        lines.append("## 策略概览")
+        lines.append(f"- 策略总数: {len(strategies)}")
+        lines.append("")
+
+        if strategies:
+            lines.append("### 策略列表")
+            lines.append("")
+            lines.append("| 源目录 | 目标目录 | 格式 |")
+            lines.append("|--------|----------|------|")
+            for source, raw in strategies.items():
+                entry = BackupEntry.from_list(raw)
+                fmt = entry.compression_format or t("table.cell.default")
+                lines.append(f"| `{source}` | `{entry.target}` | {fmt} |")
+            lines.append("")
+
+        # 历史统计
+        history = self.get_history()
+        lines.append("## 备份历史")
+        lines.append(f"- 历史记录数: {len(history)}")
+
+        if history:
+            total_size = sum(e.get("size_mb", 0) for e in history)
+            total_files = sum(e.get("files_count", 0) for e in history)
+            ratios = [e["ratio"] for e in history if "ratio" in e]
+            lines.append(f"- 累计备份大小: {total_size:.2f} MB")
+            lines.append(f"- 累计文件数: {total_files}")
+            if ratios:
+                lines.append(f"- 平均压缩率: {sum(ratios) / len(ratios):.1f}%")
+
+            # 最近 10 条记录
+            lines.append("")
+            lines.append("### 最近备份记录")
+            lines.append("")
+            lines.append("| 时间 | 源目录 | 大小(MB) | 文件数 | 压缩率 |")
+            lines.append("|------|--------|----------|--------|--------|")
+            for entry in reversed(history[-10:]):
+                ratio = entry.get("ratio", "")
+                ratio_str = f"{ratio:.0f}%" if isinstance(ratio, (int, float)) else "-"
+                lines.append(
+                    f"| {entry.get('time', '')} | `{entry.get('source', '')}` "
+                    f"| {entry.get('size_mb', 0)} | {entry.get('files_count', 0)} "
+                    f"| {ratio_str} |"
+                )
+
+        report = "\n".join(lines) + "\n"
+
+        if output_file:
+            output_dir = os.path.dirname(output_file)
+            if output_dir:
+                os.makedirs(output_dir, exist_ok=True)
+            with open(output_file, "w", encoding="utf-8") as f:
+                f.write(report)
+            print(t("cmd.report.saved", path=output_file))
+
+        return report

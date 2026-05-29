@@ -9,6 +9,7 @@ import json
 import logging
 import tempfile
 import shutil
+from pathlib import Path
 from unittest.mock import patch, MagicMock
 from sbackup.i18n import t
 
@@ -590,6 +591,176 @@ class TestMain(unittest.TestCase):
             self.assertEqual(result, 0)
         finally:
             SFTPClient._load_private_key = staticmethod(original_load)
+
+
+class TestReportCommand(unittest.TestCase):
+    """测试 report 命令"""
+
+    def setUp(self):
+        self.test_dir = tempfile.mkdtemp()
+        self.original_argv = sys.argv.copy()
+        self._root_handlers = logging.root.handlers[:]
+        self.data_path = os.path.join(self.test_dir, "sbackup.json")
+        with open(os.path.join(self.test_dir, "config.json"), "w") as f:
+            json.dump({"data_file": self.data_path}, f)
+
+    def tearDown(self):
+        sys.argv = self.original_argv
+        shutil.rmtree(self.test_dir, ignore_errors=True)
+        logging.root.handlers = self._root_handlers
+
+    @patch("builtins.print")
+    def test_report_to_stdout(self, mock_print):
+        """测试 report 命令输出到终端"""
+        os.chdir(self.test_dir)
+        sys.argv = ["sbackup", "report"]
+        from sbackup import run
+
+        result = run()
+        self.assertEqual(result, 0)
+        printed = " ".join(str(c) for c in mock_print.call_args_list)
+        self.assertIn("Sbackup", printed)
+
+    def test_report_to_file(self):
+        """测试 report 命令保存到文件"""
+        output = os.path.join(self.test_dir, "report.md")
+        os.chdir(self.test_dir)
+        sys.argv = ["sbackup", "report", "-o", output]
+        from sbackup import run
+
+        result = run()
+        self.assertEqual(result, 0)
+        self.assertTrue(os.path.exists(output))
+
+
+class TestSearchCommand(unittest.TestCase):
+    """测试 search 命令"""
+
+    def setUp(self):
+        self.test_dir = tempfile.mkdtemp()
+        self.original_argv = sys.argv.copy()
+        self._root_handlers = logging.root.handlers[:]
+        self.data_path = os.path.join(self.test_dir, "sbackup.json")
+        with open(os.path.join(self.test_dir, "config.json"), "w") as f:
+            json.dump({"data_file": self.data_path}, f)
+        # 创建备份文件
+        from sbackup.config import Config
+        from sbackup.compression import create_compressor
+
+        self.source_dir = os.path.join(self.test_dir, "source")
+        os.makedirs(self.source_dir)
+        (Path(self.source_dir) / "test.txt").write_text("hello")
+        (Path(self.source_dir) / "data.csv").write_text("csv")
+        self.dest_dir = os.path.join(self.test_dir, "dest")
+        os.makedirs(self.dest_dir)
+        config = Config(
+            folder_path=self.source_dir,
+            zipfile_path=self.dest_dir,
+            skip_patterns=[],
+        )
+        result = create_compressor(config).compress()
+        self.assertTrue(result["success"])
+        self.backup_path = result["path"]
+
+    def tearDown(self):
+        sys.argv = self.original_argv
+        shutil.rmtree(self.test_dir, ignore_errors=True)
+        logging.root.handlers = self._root_handlers
+
+    @patch("builtins.print")
+    def test_search_in_specific_backup(self, mock_print):
+        """测试 search 命令在指定备份中搜索"""
+        os.chdir(self.test_dir)
+        sys.argv = ["sbackup", "search", "*.txt", "--in", self.backup_path]
+        from sbackup import run
+
+        result = run()
+        self.assertEqual(result, 0)
+        printed = " ".join(str(c) for c in mock_print.call_args_list)
+        self.assertIn("test.txt", printed)
+
+    @patch("builtins.print")
+    def test_search_no_match(self, mock_print):
+        """测试 search 命令无匹配结果"""
+        os.chdir(self.test_dir)
+        sys.argv = ["sbackup", "search", "*.xyz", "--in", self.backup_path]
+        from sbackup import run
+
+        result = run()
+        self.assertEqual(result, 1)
+
+
+class TestDiffCommand(unittest.TestCase):
+    """测试 diff 命令"""
+
+    def setUp(self):
+        self.test_dir = tempfile.mkdtemp()
+        self.original_argv = sys.argv.copy()
+        self._root_handlers = logging.root.handlers[:]
+        self.data_path = os.path.join(self.test_dir, "sbackup.json")
+        with open(os.path.join(self.test_dir, "config.json"), "w") as f:
+            json.dump({"data_file": self.data_path}, f)
+        self.dest_dir = os.path.join(self.test_dir, "dest")
+        os.makedirs(self.dest_dir)
+        self.source_dir = os.path.join(self.test_dir, "source")
+        os.makedirs(self.source_dir)
+        (Path(self.source_dir) / "file.txt").write_text("hello")
+
+    def tearDown(self):
+        sys.argv = self.original_argv
+        shutil.rmtree(self.test_dir, ignore_errors=True)
+        logging.root.handlers = self._root_handlers
+
+    @patch("builtins.print")
+    def test_diff_no_strategy(self, mock_print):
+        """测试 diff 命令无策略"""
+        os.chdir(self.test_dir)
+        sys.argv = ["sbackup", "diff", self.source_dir]
+        from sbackup import run
+
+        result = run()
+        self.assertEqual(result, 1)
+
+    @patch("builtins.print")
+    def test_diff_nonexistent_source(self, mock_print):
+        """测试 diff 命令源目录不存在"""
+        os.chdir(self.test_dir)
+        sys.argv = ["sbackup", "diff", "/nonexistent/path"]
+        from sbackup import run
+
+        result = run()
+        self.assertEqual(result, 1)
+
+
+class TestInitCommand(unittest.TestCase):
+    """测试 init 命令生成完整模板"""
+
+    def setUp(self):
+        self.test_dir = tempfile.mkdtemp()
+        self.original_argv = sys.argv.copy()
+        self._root_handlers = logging.root.handlers[:]
+
+    def tearDown(self):
+        sys.argv = self.original_argv
+        shutil.rmtree(self.test_dir, ignore_errors=True)
+        logging.root.handlers = self._root_handlers
+
+    def test_init_generates_full_config(self):
+        """测试 init 生成包含所有字段的 config.json"""
+        os.chdir(self.test_dir)
+        sys.argv = ["sbackup", "init"]
+        from sbackup import run
+
+        result = run()
+        self.assertEqual(result, 0)
+        config_path = os.path.join(self.test_dir, "config.json")
+        self.assertTrue(os.path.exists(config_path))
+        with open(config_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        self.assertIn("webhook", data)
+        self.assertIn("sftp", data)
+        self.assertIn("webdav", data)
+        self.assertIn("compression", data)
 
 
 if __name__ == "__main__":

@@ -59,7 +59,7 @@ class TestWebDAVClient(unittest.TestCase):
         )
         with self.assertRaises(WebDAVError) as ctx:
             self.client.connect()
-        self.assertIn("auth", str(ctx.exception).lower())
+        self.assertIn("认证", str(ctx.exception))
 
     @patch("urllib.request.urlopen")
     def test_connect_network_error(self, mock_urlopen):
@@ -80,7 +80,7 @@ class TestWebDAVClient(unittest.TestCase):
         """测试上传不存在的文件"""
         with self.assertRaises(WebDAVError) as ctx:
             self.client.upload_file("/nonexistent/file.txt", "remote.txt")
-        self.assertIn("not found", str(ctx.exception).lower())
+        self.assertIn("不存在", str(ctx.exception))
 
     @patch("urllib.request.urlopen")
     def test_upload_file_http_error(self, mock_urlopen):
@@ -92,7 +92,7 @@ class TestWebDAVClient(unittest.TestCase):
         )
         with self.assertRaises(WebDAVError) as ctx:
             self.client.upload_file(self.test_file, "remote.txt")
-        self.assertIn("failed", str(ctx.exception).lower())
+        self.assertIn("失败", str(ctx.exception))
 
     @patch("urllib.request.urlopen")
     def test_ensure_remote_dir_creates(self, mock_urlopen):
@@ -142,7 +142,7 @@ class TestWebDAVClient(unittest.TestCase):
         )
         with self.assertRaises(WebDAVError) as ctx:
             self.client._ensure_remote_dir("secret")
-        self.assertIn("auth", str(ctx.exception).lower())
+        self.assertIn("认证", str(ctx.exception))
 
     @patch("urllib.request.urlopen")
     def test_ensure_remote_dir_other_error(self, mock_urlopen):
@@ -172,7 +172,7 @@ class TestWebDAVClient(unittest.TestCase):
         )
         with self.assertRaises(WebDAVError) as ctx:
             self.client.upload_file(self.test_file, "backups/test.txt")
-        self.assertIn("auth", str(ctx.exception).lower())
+        self.assertIn("认证", str(ctx.exception))
 
     @patch("urllib.request.urlopen")
     def test_upload_file_os_error(self, mock_urlopen):
@@ -214,6 +214,44 @@ class TestWebDAVClient(unittest.TestCase):
         req = self.client._build_request("PUT", "upload.txt", data=data)
         self.assertEqual(req.get_method(), "PUT")
         self.assertEqual(req.full_url, "https://dav.jianguoyun.com/dav/upload.txt")
+
+    @patch("urllib.request.urlopen")
+    def test_list_remote_files(self, mock_urlopen):
+        """测试列出远程文件"""
+        # 模拟 PROPFIND XML 响应
+        xml_response = """<?xml version="1.0" encoding="utf-8"?>
+<D:multistatus xmlns:D="DAV:">
+  <D:response>
+    <D:href>/dav/backups/</D:href>
+    <D:propstat><D:prop><D:resourcetype><D:collection/></D:resourcetype></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat>
+  </D:response>
+  <D:response>
+    <D:href>/dav/backups/backup1.zip</D:href>
+    <D:propstat>
+      <D:prop>
+        <D:getcontentlength>1024</D:getcontentlength>
+        <D:getlastmodified>Mon, 01 Jan 2024 00:00:00 GMT</D:getlastmodified>
+        <D:resourcetype/>
+      </D:prop>
+      <D:status>HTTP/1.1 200 OK</D:status>
+    </D:propstat>
+  </D:response>
+</D:multistatus>"""
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = xml_response.encode("utf-8")
+        mock_urlopen.return_value = mock_resp
+
+        result = self.client.list_remote_files("backups")
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["name"], "backup1.zip")
+        self.assertEqual(result[0]["size"], 1024)
+
+    @patch("urllib.request.urlopen")
+    def test_delete_remote_file(self, mock_urlopen):
+        """测试删除远程文件"""
+        mock_urlopen.return_value = MagicMock()
+        self.client.delete_remote_file("backups/backup1.zip")
+        mock_urlopen.assert_called_once()
 
 
 if __name__ == "__main__":

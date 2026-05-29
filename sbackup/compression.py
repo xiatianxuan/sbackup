@@ -28,6 +28,92 @@ _TAR_FORMATS = {
 }
 
 
+# 排除规则预设模板
+IGNORE_PRESETS: dict[str, list[str]] = {
+    "node": [
+        "node_modules",
+        ".npm",
+        ".yarn",
+        "dist",
+        "build",
+        ".next",
+        ".nuxt",
+        ".cache",
+        "*.log",
+        ".env",
+        ".env.local",
+    ],
+    "python": [
+        "__pycache__",
+        "*.pyc",
+        "*.pyo",
+        ".venv",
+        "venv",
+        ".env",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+        "*.egg-info",
+        "dist",
+        "build",
+        ".tox",
+        ".nox",
+        "htmlcov",
+        ".coverage",
+    ],
+    "go": [
+        "vendor",
+        "bin",
+        "*.exe",
+        "*.test",
+        "*.out",
+        ".env",
+    ],
+    "rust": [
+        "target",
+        "*.rlib",
+        "*.d",
+        ".cargo",
+        "*.pdb",
+    ],
+    "java": [
+        "target",
+        "build",
+        "*.class",
+        "*.jar",
+        "*.war",
+        ".gradle",
+        ".maven",
+        "*.log",
+    ],
+    "general": [
+        ".git",
+        ".svn",
+        ".hg",
+        "__pycache__",
+        "node_modules",
+        ".DS_Store",
+        "Thumbs.db",
+        "*.log",
+        "*.tmp",
+        "*.swp",
+        ".env",
+    ],
+}
+
+
+def generate_ignore_content(preset: str) -> str:
+    """生成 .sbackupignore 文件内容
+    :param preset: 预设名称（node/python/go/rust/java/general）
+    :return: 文件内容
+    """
+    patterns = IGNORE_PRESETS.get(preset, IGNORE_PRESETS["general"])
+    lines = [f"# sbackup ignore preset: {preset}", ""]
+    lines.extend(patterns)
+    lines.append("")
+    return "\n".join(lines)
+
+
 def _resolve_name(template: str, folder_name: str) -> str:
     """根据模板生成备份文件基础名（不含扩展名）
 
@@ -37,11 +123,14 @@ def _resolve_name(template: str, folder_name: str) -> str:
     if not template:
         return folder_name
     now = datetime.now()
-    return template.format(
-        name=folder_name,
-        date=now.strftime("%Y-%m-%d"),
-        time=now.strftime("%H%M%S"),
-    )
+    try:
+        return template.format(
+            name=folder_name,
+            date=now.strftime("%Y-%m-%d"),
+            time=now.strftime("%H%M%S"),
+        )
+    except (KeyError, ValueError):
+        return folder_name
 
 
 def _encrypt_file(file_path: str, password: str) -> str:
@@ -145,24 +234,44 @@ class BaseCompressor:
     def _should_ignore(
         self, rel_path: str, extra_patterns: list[str] | None = None
     ) -> bool:
-        """检查相对路径是否匹配忽略模式（匹配完整路径和文件名，支持 ! 取反）"""
+        """检查相对路径是否匹配忽略模式（匹配完整路径和文件名，支持 ! 取反，re: 正则）"""
+        import re
+
         all_patterns = self.skip_patterns + (extra_patterns or [])
         negated = []
         matched = False
+        basename = os.path.basename(rel_path)
         for pattern in all_patterns:
             if pattern.startswith("!"):
                 negated.append(pattern[1:])
                 continue
-            if fnmatch(rel_path, pattern) or fnmatch(
-                os.path.basename(rel_path), pattern
-            ):
-                matched = True
-        # 取反模式可以恢复被忽略的文件
+            if pattern.startswith("re:"):
+                # 正则表达式模式
+                try:
+                    if re.search(pattern[3:], rel_path) or re.search(
+                        pattern[3:], basename
+                    ):
+                        matched = True
+                except re.error:
+                    pass
+            else:
+                if fnmatch(rel_path, pattern) or fnmatch(basename, pattern):
+                    matched = True
+        # 取反模式仅在文件已被忽略时恢复（matched=True 时才生效）
+        if not matched:
+            return False
         for pattern in negated:
-            if fnmatch(rel_path, pattern) or fnmatch(
-                os.path.basename(rel_path), pattern
-            ):
-                return False
+            if pattern.startswith("re:"):
+                try:
+                    if re.search(pattern[3:], rel_path) or re.search(
+                        pattern[3:], basename
+                    ):
+                        return False
+                except re.error:
+                    pass
+            else:
+                if fnmatch(rel_path, pattern) or fnmatch(basename, pattern):
+                    return False
         return matched
 
     def _collect_files(self, folder_path: Path) -> list[tuple[str, str]]:
@@ -225,12 +334,27 @@ class BaseCompressor:
                                 file_path = Path(dirpath) / filename
                                 stat = file_path.stat()
                                 prev = self.file_metadata.get(file_rel)
-                                if prev and len(prev) >= 2:
-                                    if (
-                                        prev[0] == stat.st_mtime
-                                        and prev[1] == stat.st_size
-                                    ):
-                                        continue
+                                if prev is not None:
+                                    if isinstance(prev, str) and len(prev) == 64:
+                                        # 校验和模式：比较 SHA256
+                                        import hashlib
+
+                                        sha = hashlib.sha256()
+                                        with open(file_path, "rb") as f:
+                                            while True:
+                                                chunk = f.read(65536)
+                                                if not chunk:
+                                                    break
+                                                sha.update(chunk)
+                                        if prev == sha.hexdigest():
+                                            continue
+                                    elif isinstance(prev, list) and len(prev) >= 2:
+                                        # 元数据模式：比较 mtime + size
+                                        if (
+                                            prev[0] == stat.st_mtime
+                                            and prev[1] == stat.st_size
+                                        ):
+                                            continue
                             except OSError:
                                 pass
                         files.append((dirpath, filename))
@@ -695,14 +819,28 @@ def create_compressor(config: Config) -> BaseCompressor:
     return ZipfileCompression(config)
 
 
+def _match_select_pattern(name: str, pattern: str) -> bool:
+    """检查归档成员名是否匹配选择性还原的模式（支持 glob 通配符和精确路径）"""
+    if not pattern:
+        return True
+    basename = os.path.basename(name)
+    return fnmatch(name, pattern) or fnmatch(basename, pattern)
+
+
 def restore_backup(
-    backup_path: str, target_dir: str, password: str = "", *, quiet: bool = False
+    backup_path: str,
+    target_dir: str,
+    password: str = "",
+    *,
+    quiet: bool = False,
+    select_pattern: str = "",
 ) -> dict:
     """
     从备份文件还原到目标目录
     自动检测格式（ZIP / tar.gz / tar.bz2 / tar.xz / tar.zst / 7z）
     :param password: 解密密码（仅 7z 加密备份需要）
     :param quiet: 静默模式，不打印消息和进度条（供 verify_backup 内部调用）
+    :param select_pattern: 选择性还原模式（glob 通配符），空字符串还原全部
     :return: 包含统计信息的字典
     """
     backup = Path(backup_path)
@@ -710,6 +848,41 @@ def restore_backup(
         if not quiet:
             print(t("err.file.not_found", path=backup_path))
         return {"success": False, "files_count": 0}
+
+    # 检测分卷文件（.001 后缀），自动合并
+    tmp_merged = None
+    if backup.name.lower().endswith(".001"):
+        merged_path = str(backup)[:-4]  # 移除 .001 后缀
+        parts = []
+        part_index = 1
+        while True:
+            part_path = f"{merged_path}.{part_index:03d}"
+            if not os.path.exists(part_path):
+                break
+            parts.append(part_path)
+            part_index += 1
+        if not quiet:
+            print(t("restore.split.detected", count=len(parts)))
+        # 检查分卷是否完整（从 .001 开始连续）
+        for i, p in enumerate(parts, 1):
+            expected = f"{merged_path}.{i:03d}"
+            if p != expected:
+                if not quiet:
+                    print(t("restore.split.missing", path=expected))
+                return {"success": False, "files_count": 0}
+        # 合并到临时文件
+        import tempfile as _tmp
+
+        fd, tmp_merged = _tmp.mkstemp(suffix=os.path.splitext(merged_path)[1])
+        os.close(fd)
+        if merge_files(parts, tmp_merged):
+            if not quiet:
+                print(t("restore.split.merged", path=tmp_merged))
+            backup = Path(tmp_merged)
+        else:
+            if os.path.exists(tmp_merged):
+                os.remove(tmp_merged)
+            tmp_merged = None
 
     # 处理 .enc 加密文件
     tmp_decrypted = None
@@ -725,7 +898,16 @@ def restore_backup(
     try:
         if name_lower.endswith(".zip"):
             with zipfile.ZipFile(backup, "r") as zf:
-                members = zf.namelist()
+                all_members = zf.namelist()
+                members = (
+                    [m for m in all_members if _match_select_pattern(m, select_pattern)]
+                    if select_pattern
+                    else all_members
+                )
+                if not members:
+                    if not quiet:
+                        print(t("restore.no_match", pattern=select_pattern))
+                    return {"success": True, "files_count": 0}
                 with tqdm(
                     total=len(members),
                     desc=t("restore.progress"),
@@ -745,15 +927,35 @@ def restore_backup(
             if password:
                 szf_kwargs["password"] = password
             with py7zr.SevenZipFile(**szf_kwargs) as szf:
-                members = szf.getnames()
-                with tqdm(
-                    total=len(members),
-                    desc=t("restore.progress"),
-                    unit=t("compress.unit"),
-                    disable=quiet,
-                ) as pbar:
-                    szf.extractall(target)
-                    pbar.update(len(members))
+                all_members = szf.getnames()
+                members = (
+                    [m for m in all_members if _match_select_pattern(m, select_pattern)]
+                    if select_pattern
+                    else all_members
+                )
+                if not members:
+                    if not quiet:
+                        print(t("restore.no_match", pattern=select_pattern))
+                    return {"success": True, "files_count": 0}
+                if select_pattern:
+                    # 选择性还原：用 extract(targets=...) 提取匹配的文件
+                    with tqdm(
+                        total=len(members),
+                        desc=t("restore.progress"),
+                        unit=t("compress.unit"),
+                        disable=quiet,
+                    ) as pbar:
+                        szf.extract(path=target, targets=members)
+                        pbar.update(len(members))
+                else:
+                    with tqdm(
+                        total=len(members),
+                        desc=t("restore.progress"),
+                        unit=t("compress.unit"),
+                        disable=quiet,
+                    ) as pbar:
+                        szf.extractall(target)
+                        pbar.update(len(members))
                 if not quiet:
                     print(t("restore.success", path=target, count=len(members)))
                 return {"success": True, "files_count": len(members)}
@@ -772,7 +974,20 @@ def restore_backup(
                         tmp.write(chunk)
                 tmp.seek(0)
                 with tarfile.open(fileobj=tmp, mode="r") as tarf:
-                    members = tarf.getmembers()
+                    all_members = tarf.getmembers()
+                    members = (
+                        [
+                            m
+                            for m in all_members
+                            if _match_select_pattern(m.name, select_pattern)
+                        ]
+                        if select_pattern
+                        else all_members
+                    )
+                    if not members:
+                        if not quiet:
+                            print(t("restore.no_match", pattern=select_pattern))
+                        return {"success": True, "files_count": 0}
                     with tqdm(
                         total=len(members),
                         desc=t("restore.progress"),
@@ -799,7 +1014,20 @@ def restore_backup(
             return {"success": False, "files_count": 0}
 
         with tarfile.open(backup, mode) as tarf:
-            members = tarf.getmembers()
+            all_members = tarf.getmembers()
+            members = (
+                [
+                    m
+                    for m in all_members
+                    if _match_select_pattern(m.name, select_pattern)
+                ]
+                if select_pattern
+                else all_members
+            )
+            if not members:
+                if not quiet:
+                    print(t("restore.no_match", pattern=select_pattern))
+                return {"success": True, "files_count": 0}
             with tqdm(
                 total=len(members),
                 desc=t("restore.progress"),
@@ -829,6 +1057,8 @@ def restore_backup(
     finally:
         if tmp_decrypted and os.path.exists(tmp_decrypted):
             os.remove(tmp_decrypted)
+        if tmp_merged and os.path.exists(tmp_merged):
+            os.remove(tmp_merged)
 
 
 def _get_archive_member_names(backup: Path, password: str = "") -> list[str]:
@@ -952,3 +1182,209 @@ def verify_backup(backup_path: str, password: str = "") -> dict:
                 )
             )
             return {"success": False, "files_count": actual_count}
+
+
+def get_backup_info(backup_path: str, password: str = "") -> dict:
+    """
+    获取备份文件的详细信息：格式、文件数、大小、创建时间、SHA256 校验和
+    :return: 包含备份信息的字典，失败时 success=False
+    """
+    import hashlib
+    import time as _time
+
+    backup = Path(backup_path)
+    if not backup.exists():
+        return {"success": False, "error": t("err.file.not_found", path=backup_path)}
+
+    try:
+        stat = backup.stat()
+        size_bytes = stat.st_size
+        size_mb = size_bytes / (1024 * 1024)
+        mtime = stat.st_mtime
+        mtime_str = _time.strftime("%Y-%m-%d %H:%M:%S", _time.localtime(mtime))
+
+        # SHA256 校验和
+        sha256 = hashlib.sha256()
+        with open(backup, "rb") as f:
+            while True:
+                chunk = f.read(65536)
+                if not chunk:
+                    break
+                sha256.update(chunk)
+        checksum = sha256.hexdigest()
+
+        # 检测格式
+        name_lower = backup.name.lower()
+        if name_lower.endswith(".zip"):
+            fmt = "ZIP"
+        elif name_lower.endswith(".7z"):
+            fmt = "7Z"
+        elif name_lower.endswith(".tar.zst"):
+            fmt = "TAR_ZST"
+        elif name_lower.endswith(".tar.gz") or name_lower.endswith(".tgz"):
+            fmt = "TAR_GZ"
+        elif name_lower.endswith(".tar.bz2") or name_lower.endswith(".tbz2"):
+            fmt = "TAR_BZ2"
+        elif name_lower.endswith(".tar.xz") or name_lower.endswith(".txz"):
+            fmt = "TAR_XZ"
+        elif name_lower.endswith(".tar"):
+            fmt = "TAR"
+        elif name_lower.endswith(".enc"):
+            fmt = "ENCRYPTED"
+        else:
+            fmt = "UNKNOWN"
+
+        # 获取成员列表
+        try:
+            members = _get_archive_member_names(backup, password)
+            files_count = len(members)
+        except Exception:
+            files_count = -1
+
+        return {
+            "success": True,
+            "path": str(backup.resolve()),
+            "format": fmt,
+            "size_bytes": size_bytes,
+            "size_mb": round(size_mb, 2),
+            "files_count": files_count,
+            "mtime": mtime_str,
+            "sha256": checksum,
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+def format_backup_info(info: dict) -> str:
+    """将 get_backup_info 返回的字典格式化为可读文本"""
+    if not info.get("success"):
+        return info.get("error", t("err.unknown", error=""))
+
+    lines = [t("cmd.info.header")]
+    lines.append(t("cmd.info.path", path=info["path"]))
+    lines.append(t("cmd.info.format", format=info["format"]))
+    lines.append(t("cmd.info.size", size=info["size_mb"]))
+    lines.append(t("cmd.info.files", count=info["files_count"]))
+    lines.append(t("cmd.info.time", time=info["mtime"]))
+    lines.append(t("cmd.info.sha256", checksum=info["sha256"]))
+    return "\n".join(lines)
+
+
+def get_archive_member_set(backup_path: str, password: str = "") -> set[str]:
+    """
+    获取压缩包内所有文件的相对路径集合（用于 diff 对比）
+    过滤掉目录条目，只保留文件
+    """
+    backup = Path(backup_path)
+    if not backup.exists():
+        return set()
+    try:
+        members = _get_archive_member_names(backup, password)
+        # 过滤目录（以 / 结尾的条目），规范化路径分隔符
+        return {
+            m.rstrip("/").replace("\\", "/") for m in members if not m.endswith("/")
+        }
+    except Exception:
+        return set()
+
+
+def search_in_backup(backup_path: str, pattern: str, password: str = "") -> list[str]:
+    """在备份文件中搜索匹配的文件名（支持 glob 通配符）
+    :return: 匹配的文件名列表
+    """
+    from fnmatch import fnmatch
+
+    members = get_archive_member_set(backup_path, password)
+    if not members:
+        return []
+    return sorted(
+        m
+        for m in members
+        if fnmatch(m, pattern) or fnmatch(os.path.basename(m), pattern)
+    )
+
+
+def verify_backup_fast(backup_path: str, expected_sha256: str) -> dict:
+    """
+    快速校验备份文件完整性：计算文件 SHA256 并与预期值比对，无需解压
+    :param backup_path: 备份文件路径
+    :param expected_sha256: 预期的 SHA256 校验和
+    :return: 包含校验结果的字典
+    """
+    import hashlib
+
+    backup = Path(backup_path)
+    if not backup.exists():
+        return {"success": False, "error": t("err.file.not_found", path=backup_path)}
+
+    sha256 = hashlib.sha256()
+    try:
+        with open(backup, "rb") as f:
+            while True:
+                chunk = f.read(65536)
+                if not chunk:
+                    break
+                sha256.update(chunk)
+    except OSError as e:
+        return {"success": False, "error": str(e)}
+
+    actual = sha256.hexdigest()
+    if actual == expected_sha256:
+        return {"success": True, "sha256": actual}
+    return {
+        "success": False,
+        "error": t("cmd.verify.checksum_mismatch"),
+        "expected": expected_sha256,
+        "actual": actual,
+    }
+
+
+def split_file(file_path: str, chunk_size: int) -> list[str]:
+    """将大文件分割为多个分卷文件
+    :param file_path: 要分割的文件路径
+    :param chunk_size: 每个分卷的大小（字节）
+    :return: 分卷文件路径列表
+    """
+    if chunk_size <= 0:
+        return [file_path]
+
+    file_size = os.path.getsize(file_path)
+    if file_size <= chunk_size:
+        return [file_path]
+
+    parts = []
+    part_index = 1
+    with open(file_path, "rb") as f:
+        while True:
+            chunk = f.read(chunk_size)
+            if not chunk:
+                break
+            part_path = f"{file_path}.{part_index:03d}"
+            with open(part_path, "wb") as pf:
+                pf.write(chunk)
+            parts.append(part_path)
+            part_index += 1
+
+    # 删除原文件
+    os.remove(file_path)
+    return parts
+
+
+def merge_files(part_paths: list[str], output_path: str) -> bool:
+    """合并分卷文件为单个文件
+    :param part_paths: 分卷文件路径列表（按顺序）
+    :param output_path: 输出文件路径
+    :return: 是否成功
+    """
+    try:
+        with open(output_path, "wb") as out_f:
+            for part_path in part_paths:
+                with open(part_path, "rb") as in_f:
+                    while True:
+                        chunk = in_f.read(65536)
+                        if not chunk:
+                            break
+                        out_f.write(chunk)
+        return True
+    except OSError:
+        return False

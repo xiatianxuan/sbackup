@@ -69,8 +69,14 @@ class Config:
     password: str = ""
     # 备份文件名模板
     name_template: str = ""
-    # Webhook 通知 URL
+    # Webhook 通知 URL（单个，向后兼容）
     webhook_url: str = ""
+    # Webhook 通知 URL 列表（支持多个）
+    webhook_urls: list[str] = field(default_factory=list)
+    # Webhook 自定义 payload 模板（空字符串使用默认 JSON）
+    webhook_template: str = ""
+    # Webhook 失败重试次数
+    webhook_retries: int = 2
     # 符号链接处理
     follow_symlinks: bool = False
     # 文件过滤（字节数，0 = 不限制）
@@ -120,6 +126,20 @@ def load_config(config_file: str = "config.json") -> Config:
     name_template = config_data.get("name_template", "")
     webhook_config = config_data.get("webhook", {})
     sftp_config = config_data.get("sftp", {})
+
+    # 向后兼容：单个 url 字段自动迁移到 urls 列表
+    webhook_urls: list[str] = []
+    webhook_template = ""
+    webhook_retries = 2
+    webhook_url_legacy = ""
+    if isinstance(webhook_config, dict):
+        webhook_url_legacy = webhook_config.get("url", "")
+        webhook_urls = webhook_config.get("urls", [])
+        webhook_template = webhook_config.get("template", "")
+        webhook_retries = webhook_config.get("retries", 2)
+        # 向后兼容：如果有 url 但没有 urls，自动合并
+        if webhook_url_legacy and not webhook_urls:
+            webhook_urls = [webhook_url_legacy]
     webdav_config = config_data.get("webdav", {})
 
     return Config(
@@ -133,9 +153,10 @@ def load_config(config_file: str = "config.json") -> Config:
         data_file=data_file,
         password=password,
         name_template=name_template,
-        webhook_url=webhook_config.get("url", "")
-        if isinstance(webhook_config, dict)
-        else "",
+        webhook_url=webhook_url_legacy,
+        webhook_urls=webhook_urls,
+        webhook_template=webhook_template,
+        webhook_retries=webhook_retries,
         sftp_host=sftp_config.get("host", ""),
         sftp_port=sftp_config.get("port", 22),
         sftp_user=sftp_config.get("user", ""),
@@ -210,3 +231,222 @@ def save_webdav_config(
         "enabled": enabled,
     }
     _save_json_file(data, config_file)
+
+
+def generate_config_template(config_file: str = "config.json") -> None:
+    """生成完整的 config.json 模板，包含所有配置项的默认值"""
+    template = {
+        "lang": "zh_CN",
+        "compression_format": "ZIP",
+        "compression": {
+            "algorithm": "ZIP_DEFLATED",
+            "level": 6,
+        },
+        "skip_patterns": [".git", "__pycache__"],
+        "name_template": "",
+        "password": "",
+        "webhook": {
+            "urls": [],
+            "template": "",
+            "retries": 2,
+        },
+        "sftp": {
+            "host": "",
+            "port": 22,
+            "user": "",
+            "password": "",
+            "key_file": "",
+            "key_passphrase": "",
+            "remote_path": "/",
+            "enabled": False,
+        },
+        "webdav": {
+            "url": "",
+            "user": "",
+            "password": "",
+            "remote_path": "/",
+            "enabled": False,
+        },
+    }
+    _save_json_file(template, config_file)
+
+
+# 配置文件加密/解密
+_SENSITIVE_FIELDS = [
+    ("password",),
+    ("sftp", "password"),
+    ("sftp", "key_passphrase"),
+    ("webdav", "password"),
+]
+
+
+def _derive_key(master_password: str, salt: bytes) -> bytes:
+    """从主密码派生加密密钥"""
+    import hashlib
+
+    return hashlib.pbkdf2_hmac("sha256", master_password.encode("utf-8"), salt, 100_000)
+
+
+def _encrypt_value(value: str, key: bytes) -> str:
+    """加密单个字符串值，返回 base64 编码的 salt+密文"""
+    import base64
+
+    salt = os.urandom(16)
+    derived = _derive_key(key.hex(), salt)
+    encrypted = bytes(
+        a ^ b for a, b in zip(value.encode("utf-8"), derived[: len(value)])
+    )
+    return base64.b64encode(salt + encrypted).decode("ascii")
+
+
+def _decrypt_value(encrypted_value: str, key: bytes) -> str:
+    """解密单个字符串值"""
+    import base64
+
+    data = base64.b64decode(encrypted_value)
+    salt = data[:16]
+    ciphertext = data[16:]
+    derived = _derive_key(key.hex(), salt)
+    decrypted = bytes(a ^ b for a, b in zip(ciphertext, derived[: len(ciphertext)]))
+    return decrypted.decode("utf-8")
+
+
+def encrypt_config(master_password: str, config_file: str = "config.json") -> bool:
+    """用主密码加密配置文件中的敏感字段
+    :return: 是否成功
+    """
+    data = _load_json_file(config_file)
+    if not data:
+        return False
+
+    import hashlib
+
+    # 用主密码的哈希作为加密密钥
+    key = hashlib.sha256(master_password.encode("utf-8")).digest()
+
+    for field_path in _SENSITIVE_FIELDS:
+        obj = data
+        for part in field_path[:-1]:
+            obj = obj.get(part, {})
+        field_name = field_path[-1]
+        value = obj.get(field_name, "")
+        if value and not value.startswith("enc:"):
+            obj[field_name] = "enc:" + _encrypt_value(value, key)
+
+    data["_encrypted"] = True
+    _save_json_file(data, config_file)
+    return True
+
+
+def decrypt_config(master_password: str, config_file: str = "config.json") -> bool:
+    """用主密码解密配置文件中的敏感字段
+    :return: 是否成功（密码错误时返回 False）
+    """
+    data = _load_json_file(config_file)
+    if not data or not data.get("_encrypted"):
+        return True  # 未加密，视为成功
+
+    import hashlib
+
+    key = hashlib.sha256(master_password.encode("utf-8")).digest()
+
+    try:
+        for field_path in _SENSITIVE_FIELDS:
+            obj = data
+            for part in field_path[:-1]:
+                obj = obj.get(part, {})
+            field_name = field_path[-1]
+            value = obj.get(field_name, "")
+            if value and value.startswith("enc:"):
+                obj[field_name] = _decrypt_value(value[4:], key)
+    except (UnicodeDecodeError, ValueError):
+        return False
+
+    data["_encrypted"] = False
+    _save_json_file(data, config_file)
+    return True
+
+
+def is_config_encrypted(config_file: str = "config.json") -> bool:
+    """检查配置文件是否已加密"""
+    data = _load_json_file(config_file)
+    return bool(data.get("_encrypted", False))
+
+
+# IM 通知 Webhook 预设模板
+WEBHOOK_PRESETS: dict[str, dict[str, str]] = {
+    "dingtalk": {
+        "name": "钉钉机器人",
+        "template": '{"msgtype":"text","text":{"content":"[sbackup] {status} | 备份: {backed} | 跳过: {skipped} | 耗时: {elapsed}s"}}',
+        "content_type": "application/json",
+    },
+    "feishu": {
+        "name": "飞书机器人",
+        "template": '{"msg_type":"text","content":{"text":"[sbackup] {status} | 备份: {backed} | 跳过: {skipped} | 耗时: {elapsed}s"}}',
+        "content_type": "application/json",
+    },
+    "wechat": {
+        "name": "企业微信机器人",
+        "template": '{"msgtype":"text","text":{"content":"[sbackup] {status}\n备份: {backed}\n跳过: {skipped}\n耗时: {elapsed}s"}}',
+        "content_type": "application/json",
+    },
+}
+
+
+def setup_webhook_preset(preset: str, config_file: str = "config.json") -> str:
+    """配置 IM 通知 Webhook 预设
+    :param preset: 预设名称（dingtalk/feishu/wechat）
+    :return: 预设的 template 字符串
+    """
+    info = WEBHOOK_PRESETS.get(preset)
+    if not info:
+        return ""
+    data = _load_json_file(config_file)
+    webhook = data.get("webhook", {})
+    webhook["template"] = info["template"]
+    data["webhook"] = webhook
+    _save_json_file(data, config_file)
+    return info["template"]
+
+
+def parse_gitignore(gitignore_path: str) -> list[str]:
+    """解析 .gitignore 文件并转换为 sbackup 的 skip_patterns
+    :param gitignore_path: .gitignore 文件路径
+    :return: skip_patterns 列表
+    """
+    if not os.path.isfile(gitignore_path):
+        return []
+
+    patterns = []
+    try:
+        with open(gitignore_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                # 跳过空行和注释
+                if not line or line.startswith("#"):
+                    continue
+                # 取反模式保留
+                if line.startswith("!"):
+                    pattern = line[1:]
+                    patterns.append("!" + _gitignore_to_fnmatch(pattern))
+                else:
+                    patterns.append(_gitignore_to_fnmatch(line))
+    except OSError:
+        pass
+    return patterns
+
+
+def _gitignore_to_fnmatch(pattern: str) -> str:
+    """将单个 .gitignore 模式转换为 fnmatch 兼容模式"""
+    # 移除尾部斜杠（目录标记）
+    pattern = pattern.rstrip("/")
+    # 移除开头斜杠（根目录标记，fnmatch 不需要）
+    pattern = pattern.lstrip("/")
+    # ** 匹配任意路径深度 → 转为 *
+    pattern = pattern.replace("**/", "*")
+    pattern = pattern.replace("/**", "*")
+    # 如果模式不包含路径分隔符且不以 * 开头，添加前缀匹配
+    # 例如 "build" 应匹配 "build" 和 "sub/build"
+    if "/" not in pattern and not pattern.startswith("*"):
+        pattern = f"*{pattern}"
+    return pattern

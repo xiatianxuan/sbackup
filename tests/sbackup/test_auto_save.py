@@ -130,6 +130,109 @@ class TestAutoSave(unittest.TestCase):
         result = self.manager.rm_folder("/nonexistent/path")
         self.assertFalse(result)
 
+    def test_edit_strategy_target(self):
+        """测试编辑策略的目标路径"""
+        self.manager.add_folder(self.source_folder, self.target_folder)
+        new_target = os.path.join(self.test_dir, "new_target")
+        os.makedirs(new_target)
+        result = self.manager.edit_strategy(self.source_folder, new_target=new_target)
+        self.assertTrue(result)
+        abs_source = os.path.abspath(self.source_folder)
+        entry = self.manager._get_entry(abs_source)
+        assert entry is not None
+        self.assertEqual(entry.target, os.path.abspath(new_target))
+
+    def test_edit_strategy_ignore(self):
+        """测试编辑策略的忽略模式"""
+        self.manager.add_folder(self.source_folder, self.target_folder, ".git")
+        result = self.manager.edit_strategy(
+            self.source_folder, new_ignore="node_modules,dist"
+        )
+        self.assertTrue(result)
+        abs_source = os.path.abspath(self.source_folder)
+        entry = self.manager._get_entry(abs_source)
+        assert entry is not None
+        self.assertEqual(entry.skip_patterns, ["node_modules", "dist"])
+
+    def test_edit_strategy_format(self):
+        """测试编辑策略的打包格式"""
+        self.manager.add_folder(self.source_folder, self.target_folder)
+        result = self.manager.edit_strategy(self.source_folder, new_format="tar.gz")
+        self.assertTrue(result)
+        abs_source = os.path.abspath(self.source_folder)
+        entry = self.manager._get_entry(abs_source)
+        assert entry is not None
+        self.assertEqual(entry.compression_format, "TAR_GZ")
+
+    def test_edit_strategy_name_template(self):
+        """测试编辑策略的文件名模板"""
+        self.manager.add_folder(self.source_folder, self.target_folder)
+        result = self.manager.edit_strategy(
+            self.source_folder, new_name_template="{name}_{date}"
+        )
+        self.assertTrue(result)
+        abs_source = os.path.abspath(self.source_folder)
+        entry = self.manager._get_entry(abs_source)
+        assert entry is not None
+        self.assertEqual(entry.name_template, "{name}_{date}")
+
+    def test_edit_strategy_multiple_fields(self):
+        """测试同时编辑多个字段"""
+        self.manager.add_folder(self.source_folder, self.target_folder)
+        new_target = os.path.join(self.test_dir, "new_target2")
+        os.makedirs(new_target)
+        result = self.manager.edit_strategy(
+            self.source_folder,
+            new_target=new_target,
+            new_ignore="*.log,tmp",
+            new_format="7z",
+        )
+        self.assertTrue(result)
+        abs_source = os.path.abspath(self.source_folder)
+        entry = self.manager._get_entry(abs_source)
+        assert entry is not None
+        self.assertEqual(entry.target, os.path.abspath(new_target))
+        self.assertEqual(entry.skip_patterns, ["*.log", "tmp"])
+        self.assertEqual(entry.compression_format, "7Z")
+
+    def test_edit_nonexistent_strategy(self):
+        """测试编辑不存在的策略应失败"""
+        result = self.manager.edit_strategy("/nonexistent/path", new_format="tar")
+        self.assertFalse(result)
+
+    def test_edit_no_changes(self):
+        """测试未指定任何修改参数应失败"""
+        self.manager.add_folder(self.source_folder, self.target_folder)
+        result = self.manager.edit_strategy(self.source_folder)
+        self.assertFalse(result)
+
+    def test_edit_invalid_target(self):
+        """测试编辑为无效目标路径应失败"""
+        self.manager.add_folder(self.source_folder, self.target_folder)
+        result = self.manager.edit_strategy(
+            self.source_folder, new_target="/nonexistent/path"
+        )
+        self.assertFalse(result)
+
+    def test_edit_same_target(self):
+        """测试编辑目标为源目录本身应失败"""
+        self.manager.add_folder(self.source_folder, self.target_folder)
+        result = self.manager.edit_strategy(
+            self.source_folder, new_target=self.source_folder
+        )
+        self.assertFalse(result)
+
+    def test_edit_persistence(self):
+        """测试编辑后数据持久化"""
+        self.manager.add_folder(self.source_folder, self.target_folder)
+        self.manager.edit_strategy(self.source_folder, new_format="tar.xz")
+        # 重新加载数据
+        self.manager.load()
+        abs_source = os.path.abspath(self.source_folder)
+        entry = self.manager._get_entry(abs_source)
+        assert entry is not None
+        self.assertEqual(entry.compression_format, "TAR_XZ")
+
     def test_add_invalid_source(self):
         """测试添加无效源目录应失败"""
         result = self.manager.add_folder("/nonexistent/path", self.target_folder)
@@ -717,6 +820,404 @@ class TestUploadWebdav(unittest.TestCase):
             BackupManager._upload_to_webdav([self.test_file], config)
             printed = " ".join(str(c) for c in mock_print.call_args_list)
             self.assertIn("connect failed", printed)
+
+
+class TestEditStrategy(unittest.TestCase):
+    """测试 edit_strategy 方法"""
+
+    def setUp(self):
+        self.test_dir = tempfile.mkdtemp()
+        self.original_cwd = os.getcwd()
+        os.chdir(self.test_dir)
+        self.data_file = os.path.join(self.test_dir, "test_sbackup.json")
+        self.manager = BackupManager(self.data_file)
+        self.source_folder = os.path.join(self.test_dir, "source")
+        self.target_folder = os.path.join(self.test_dir, "target")
+        os.makedirs(self.source_folder)
+        os.makedirs(self.target_folder)
+        self.manager.add_folder(self.source_folder, self.target_folder, ".git")
+
+    def tearDown(self):
+        os.chdir(self.original_cwd)
+        shutil.rmtree(self.test_dir)
+
+    def test_edit_target(self):
+        """测试修改目标路径"""
+        new_target = os.path.join(self.test_dir, "new_target")
+        os.makedirs(new_target)
+        result = self.manager.edit_strategy(self.source_folder, new_target=new_target)
+        self.assertTrue(result)
+        entry = self.manager._get_entry(os.path.abspath(self.source_folder))
+        assert entry is not None
+        self.assertEqual(entry.target, os.path.abspath(new_target))
+
+    def test_edit_ignore(self):
+        """测试修改忽略模式"""
+        result = self.manager.edit_strategy(
+            self.source_folder, new_ignore="node_modules,dist"
+        )
+        self.assertTrue(result)
+        entry = self.manager._get_entry(os.path.abspath(self.source_folder))
+        assert entry is not None
+        self.assertEqual(entry.skip_patterns, ["node_modules", "dist"])
+
+    def test_edit_format(self):
+        """测试修改打包格式"""
+        result = self.manager.edit_strategy(self.source_folder, new_format="tar.gz")
+        self.assertTrue(result)
+        entry = self.manager._get_entry(os.path.abspath(self.source_folder))
+        assert entry is not None
+        self.assertEqual(entry.compression_format, "TAR_GZ")
+
+    def test_edit_name_template(self):
+        """测试修改文件名模板"""
+        result = self.manager.edit_strategy(
+            self.source_folder, new_name_template="{name}_{date}"
+        )
+        self.assertTrue(result)
+        entry = self.manager._get_entry(os.path.abspath(self.source_folder))
+        assert entry is not None
+        self.assertEqual(entry.name_template, "{name}_{date}")
+
+    def test_edit_multiple_fields(self):
+        """测试同时修改多个字段"""
+        result = self.manager.edit_strategy(
+            self.source_folder,
+            new_ignore="*.log,tmp",
+            new_format="7z",
+        )
+        self.assertTrue(result)
+        entry = self.manager._get_entry(os.path.abspath(self.source_folder))
+        assert entry is not None
+        self.assertEqual(entry.skip_patterns, ["*.log", "tmp"])
+        self.assertEqual(entry.compression_format, "7Z")
+
+    def test_edit_no_changes(self):
+        """测试未指定修改参数"""
+        result = self.manager.edit_strategy(self.source_folder)
+        self.assertFalse(result)
+
+    def test_edit_nonexistent_strategy(self):
+        """测试编辑不存在的策略"""
+        result = self.manager.edit_strategy("/nonexistent/path", new_format="tar")
+        self.assertFalse(result)
+
+    def test_edit_invalid_target(self):
+        """测试修改为不存在的目标路径"""
+        result = self.manager.edit_strategy(
+            self.source_folder, new_target="/nonexistent/target"
+        )
+        self.assertFalse(result)
+
+    def test_edit_same_target(self):
+        """测试修改为与源相同的目标路径"""
+        result = self.manager.edit_strategy(
+            self.source_folder, new_target=self.source_folder
+        )
+        self.assertFalse(result)
+
+
+class TestWebhook(unittest.TestCase):
+    """测试 Webhook 增强功能"""
+
+    @patch("urllib.request.urlopen")
+    def test_send_webhook_single(self, mock_urlopen):
+        """测试发送单个 webhook"""
+        mock_urlopen.return_value = MagicMock()
+        BackupManager._send_webhook(
+            "https://example.com/hook",
+            status="success",
+            backed=2,
+            skipped=1,
+            elapsed=5.0,
+        )
+        mock_urlopen.assert_called_once()
+
+    @patch("urllib.request.urlopen")
+    def test_send_webhook_with_template(self, mock_urlopen):
+        """测试自定义模板 webhook"""
+        mock_urlopen.return_value = MagicMock()
+        BackupManager._send_webhook(
+            "https://example.com/hook",
+            status="success",
+            backed=2,
+            skipped=1,
+            elapsed=5.0,
+            template='{"event":"backup","status":"{status}"}',
+        )
+        req = mock_urlopen.call_args[0][0]
+        import json
+
+        payload = json.loads(req.data.decode("utf-8"))
+        self.assertEqual(payload["status"], "success")
+
+    @patch("urllib.request.urlopen")
+    def test_send_webhook_retries(self, mock_urlopen):
+        """测试 webhook 重试机制"""
+        import urllib.error
+
+        mock_urlopen.side_effect = urllib.error.URLError("timeout")
+        BackupManager._send_webhook(
+            "https://example.com/hook",
+            status="success",
+            backed=1,
+            skipped=0,
+            elapsed=1.0,
+            retries=3,
+        )
+        self.assertEqual(mock_urlopen.call_count, 3)
+
+    @patch("urllib.request.urlopen")
+    def test_send_webhooks_multiple(self, mock_urlopen):
+        """测试多个 webhook URL"""
+        mock_urlopen.return_value = MagicMock()
+        BackupManager._send_webhooks(
+            ["https://hook1.example.com", "https://hook2.example.com"],
+            status="success",
+            backed=1,
+            skipped=0,
+            elapsed=1.0,
+        )
+        self.assertEqual(mock_urlopen.call_count, 2)
+
+
+class TestDiffBackup(unittest.TestCase):
+    """测试 diff_backup 和 format_diff 方法"""
+
+    def setUp(self):
+        self.test_dir = tempfile.mkdtemp()
+        self.original_cwd = os.getcwd()
+        os.chdir(self.test_dir)
+        self.data_file = os.path.join(self.test_dir, "test_sbackup.json")
+        self.manager = BackupManager(self.data_file)
+        self.source_folder = os.path.join(self.test_dir, "source")
+        self.target_folder = os.path.join(self.test_dir, "target")
+        os.makedirs(self.source_folder)
+        os.makedirs(self.target_folder)
+        # 创建源文件
+        (Path(self.source_folder) / "file1.txt").write_text("hello")
+        (Path(self.source_folder) / "file2.txt").write_text("world")
+        # 添加策略
+        self.manager.add_folder(self.source_folder, self.target_folder)
+        # 强制 mtime 为 0 确保备份执行
+        abs_source = os.path.abspath(self.source_folder)
+        entry = self.manager._get_entry(abs_source)
+        assert entry is not None
+        entry.mtime = 0.0
+        self.manager._set_entry(abs_source, entry)
+        self.manager.save()
+        self.manager.execute_backups()
+
+    def tearDown(self):
+        os.chdir(self.original_cwd)
+        shutil.rmtree(self.test_dir)
+
+    def test_diff_no_changes(self):
+        """测试无差异时返回空列表"""
+        result = self.manager.diff_backup(self.source_folder)
+        self.assertTrue(result["success"])
+        self.assertEqual(len(result["added"]), 0)
+        self.assertEqual(len(result["removed"]), 0)
+
+    def test_diff_with_new_file(self):
+        """测试新增文件被检测到"""
+        (Path(self.source_folder) / "new_file.txt").write_text("new")
+        result = self.manager.diff_backup(self.source_folder)
+        self.assertTrue(result["success"])
+        self.assertTrue(len(result["added"]) > 0)
+
+    def test_diff_with_specified_backup(self):
+        """测试指定备份文件路径"""
+        import glob
+
+        backups = glob.glob(os.path.join(self.target_folder, "*"))
+        self.assertTrue(len(backups) > 0)
+        result = self.manager.diff_backup(self.source_folder, backup_file=backups[0])
+        self.assertTrue(result["success"])
+
+    def test_diff_nonexistent_backup_file(self):
+        """测试指定不存在的备份文件"""
+        result = self.manager.diff_backup(
+            self.source_folder, backup_file="/nonexistent/file.zip"
+        )
+        self.assertFalse(result["success"])
+
+    def test_diff_no_strategy(self):
+        """测试没有策略时的行为"""
+        result = self.manager.diff_backup("/nonexistent/source")
+        self.assertFalse(result["success"])
+
+    def test_diff_no_backup_in_target(self):
+        """测试目标目录无备份文件"""
+        empty_target = os.path.join(self.test_dir, "empty_target")
+        os.makedirs(empty_target)
+        manager2 = BackupManager(os.path.join(self.test_dir, "data2.json"))
+        source2 = os.path.join(self.test_dir, "source2")
+        os.makedirs(source2)
+        (Path(source2) / "f.txt").write_text("x")
+        manager2.add_folder(source2, empty_target)
+        result = manager2.diff_backup(source2)
+        self.assertFalse(result["success"])
+
+    def test_format_diff_with_changes(self):
+        """测试 format_diff 输出包含差异信息"""
+        (Path(self.source_folder) / "added.txt").write_text("new")
+        result = self.manager.diff_backup(self.source_folder)
+        text = self.manager.format_diff(result)
+        self.assertIn("+", text)
+        self.assertIn("added.txt", text)
+
+    def test_format_diff_no_changes(self):
+        """测试 format_diff 无差异输出（共同文件显示为可能修改）"""
+        result = self.manager.diff_backup(self.source_folder)
+        text = self.manager.format_diff(result)
+        # diff 总是将共同文件列为"可能修改"
+        self.assertIn("差异对比", text)
+        self.assertIn("差异摘要", text)
+
+    def test_format_diff_failure(self):
+        """测试 format_diff 失败时返回空字符串"""
+        text = self.manager.format_diff({"success": False})
+        self.assertEqual(text, "")
+
+
+class TestExportReport(unittest.TestCase):
+    """测试 export_report 方法"""
+
+    def setUp(self):
+        self.test_dir = tempfile.mkdtemp()
+        self.original_cwd = os.getcwd()
+        os.chdir(self.test_dir)
+        self.data_file = os.path.join(self.test_dir, "test_sbackup.json")
+        self.manager = BackupManager(self.data_file)
+
+    def tearDown(self):
+        os.chdir(self.original_cwd)
+        shutil.rmtree(self.test_dir)
+
+    def test_report_empty(self):
+        """测试空策略时生成报告"""
+        report = self.manager.export_report()
+        self.assertIn("Sbackup", report)
+        self.assertIn("策略总数: 0", report)
+
+    def test_report_with_strategies(self):
+        """测试有策略时生成报告"""
+        source = os.path.join(self.test_dir, "source")
+        target = os.path.join(self.test_dir, "target")
+        os.makedirs(source)
+        os.makedirs(target)
+        (Path(source) / "f.txt").write_text("data")
+        self.manager.add_folder(source, target)
+        self.manager.execute_backups()
+        report = self.manager.export_report()
+        self.assertIn("策略总数: 1", report)
+        self.assertIn("source", report)
+
+    def test_report_save_to_file(self):
+        """测试保存报告到文件"""
+        output = os.path.join(self.test_dir, "report.md")
+        self.manager.export_report(output)
+        self.assertTrue(os.path.exists(output))
+        with open(output, "r", encoding="utf-8") as f:
+            content = f.read()
+        self.assertIn("Sbackup", content)
+
+
+class TestCleanupKeepDays(unittest.TestCase):
+    """测试 _cleanup_old_backups 的 keep_days 功能"""
+
+    def setUp(self):
+        self.test_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.test_dir, ignore_errors=True)
+
+    def _create_backup_file(self, name: str, mtime: float = 0):
+        """创建一个备份文件并设置修改时间"""
+        path = Path(self.test_dir) / name
+        path.write_text("fake backup")
+        if mtime > 0:
+            os.utime(path, (mtime, mtime))
+        return path
+
+    def test_keep_days_removes_old(self):
+        """测试 keep_days 删除过期文件"""
+        import time as _time
+
+        now = _time.time()
+        old_file = self._create_backup_file("old.zip", now - 40 * 86400)
+        new_file = self._create_backup_file("new.zip", now - 1 * 86400)
+        BackupManager._cleanup_old_backups(self.test_dir, keep_days=30)
+        self.assertFalse(old_file.exists())
+        self.assertTrue(new_file.exists())
+
+    def test_keep_days_keeps_recent(self):
+        """测试 keep_days 保留近期文件"""
+        import time as _time
+
+        now = _time.time()
+        f1 = self._create_backup_file("f1.zip", now - 5 * 86400)
+        f2 = self._create_backup_file("f2.tar.gz", now - 10 * 86400)
+        BackupManager._cleanup_old_backups(self.test_dir, keep_days=30)
+        self.assertTrue(f1.exists())
+        self.assertTrue(f2.exists())
+
+    def test_keep_zero_no_cleanup(self):
+        """测试 keep=0 且 keep_days=0 时不清理"""
+        self._create_backup_file("old.zip")
+        BackupManager._cleanup_old_backups(self.test_dir, keep=0, keep_days=0)
+        self.assertTrue(os.path.exists(os.path.join(self.test_dir, "old.zip")))
+
+    def test_keep_combined(self):
+        """测试 keep 和 keep_days 组合使用"""
+        import time as _time
+
+        now = _time.time()
+        for i in range(5):
+            self._create_backup_file(f"f{i}.zip", now - i * 86400)
+        # keep=2 保留最新2个，keep_days=2 删除2天前的
+        BackupManager._cleanup_old_backups(self.test_dir, keep=2, keep_days=2)
+        remaining = list(Path(self.test_dir).glob("*.zip"))
+        # f0 和 f1 应该保留（最新2个且在2天内）
+        self.assertLessEqual(len(remaining), 3)
+
+
+class TestAddHistoryChecksum(unittest.TestCase):
+    """测试 _add_history 的 SHA256 校验和功能"""
+
+    def setUp(self):
+        self.test_dir = tempfile.mkdtemp()
+        self.data_file = os.path.join(self.test_dir, "test.json")
+        self.manager = BackupManager(self.data_file)
+
+    def tearDown(self):
+        shutil.rmtree(self.test_dir, ignore_errors=True)
+
+    def test_checksum_stored(self):
+        """测试备份文件的 SHA256 被存储到历史记录"""
+        backup_file = os.path.join(self.test_dir, "backup.zip")
+        with open(backup_file, "wb") as f:
+            f.write(b"test backup content")
+        self.manager._add_history("/source", 1.0, 10, 2.0, backup_path=backup_file)
+        history = self.manager.get_history()
+        self.assertEqual(len(history), 1)
+        self.assertIn("sha256", history[0])
+        self.assertEqual(len(history[0]["sha256"]), 64)
+
+    def test_no_checksum_without_path(self):
+        """测试不传 backup_path 时不存储校验和"""
+        self.manager._add_history("/source", 1.0, 10)
+        history = self.manager.get_history()
+        self.assertNotIn("sha256", history[0])
+
+    def test_no_checksum_nonexistent_file(self):
+        """测试文件不存在时不存储校验和"""
+        self.manager._add_history(
+            "/source", 1.0, 10, backup_path="/nonexistent/file.zip"
+        )
+        history = self.manager.get_history()
+        self.assertNotIn("sha256", history[0])
 
 
 if __name__ == "__main__":

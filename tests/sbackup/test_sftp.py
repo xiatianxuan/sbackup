@@ -678,6 +678,53 @@ class TestSFTPClient(unittest.TestCase):
         mock_transport.close.assert_called_once()
         self.assertIsNone(client._transport)
 
+    @patch("paramiko.Transport")
+    @patch("paramiko.SFTPClient")
+    def test_list_remote_files(self, mock_sftp_cls, mock_transport_cls):
+        """测试列出远程文件"""
+        mock_transport = MagicMock()
+        mock_transport_cls.return_value = mock_transport
+        mock_sftp = MagicMock()
+        mock_sftp_cls.from_transport.return_value = mock_sftp
+
+        # 模拟 SFTP_ATTR 列表
+        mock_attr1 = MagicMock()
+        mock_attr1.filename = "backup1.zip"
+        mock_attr1.st_size = 1024
+        mock_attr1.st_mtime = 1700000000.0
+        mock_attr1.st_mode = 0o100644  # 普通文件
+
+        mock_attr2 = MagicMock()
+        mock_attr2.filename = "subdir"
+        mock_attr2.st_size = 0
+        mock_attr2.st_mtime = 1700000000.0
+        mock_attr2.st_mode = 0o040755  # 目录
+
+        mock_sftp.listdir_attr.return_value = [mock_attr1, mock_attr2]
+
+        client = SFTPClient(self.host, self.port, self.user, self.password)
+        client.connect()
+        result = client.list_remote_files("/backups")
+
+        self.assertEqual(len(result), 1)  # 目录被过滤
+        self.assertEqual(result[0]["name"], "backup1.zip")
+        self.assertEqual(result[0]["size"], 1024)
+
+    @patch("paramiko.Transport")
+    @patch("paramiko.SFTPClient")
+    def test_delete_remote_file(self, mock_sftp_cls, mock_transport_cls):
+        """测试删除远程文件"""
+        mock_transport = MagicMock()
+        mock_transport_cls.return_value = mock_transport
+        mock_sftp = MagicMock()
+        mock_sftp_cls.from_transport.return_value = mock_sftp
+
+        client = SFTPClient(self.host, self.port, self.user, self.password)
+        client.connect()
+        client.delete_remote_file("/backups/backup1.zip")
+
+        mock_sftp.remove.assert_called_once_with("/backups/backup1.zip")
+
 
 if __name__ == "__main__":
     unittest.main()
