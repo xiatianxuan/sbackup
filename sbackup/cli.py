@@ -94,6 +94,11 @@ def get_parser() -> argparse.ArgumentParser:
         choices=["zip", "tar", "tar.gz", "tar.bz2", "tar.xz", "tar.zst", "7z"],
         help=t("cli.help.format"),
     )
+    parser.add_argument(
+        "--profile",
+        default=None,
+        help=t("cli.help.profile_name"),
+    )
 
     subparsers = parser.add_subparsers(dest="command", help=t("cli.help.subcommands"))
 
@@ -351,10 +356,22 @@ def get_parser() -> argparse.ArgumentParser:
     )
     restore_parser.add_argument(
         "--select",
-        default="",
+        action="append",
+        default=None,
         help=t("cli.help.restore.select"),
     )
     restore_parser.add_argument("--tag", default="", help=t("cli.help.restore.tag"))
+    restore_parser.add_argument(
+        "--search",
+        default=None,
+        help=t("cli.help.restore.search"),
+    )
+    restore_parser.add_argument(
+        "--stats",
+        action="store_true",
+        default=False,
+        help=t("cli.help.restore.stats"),
+    )
 
     info_parser = subparsers.add_parser("info", help=t("cli.help.info"))
     info_parser.add_argument("backup_file", help=t("cli.help.info.file"))
@@ -728,6 +745,95 @@ def get_parser() -> argparse.ArgumentParser:
 
     task_sub.add_parser("clear", help=t("cli.help.task.clear"))
     task_sub.add_parser("stats", help=t("cli.help.task.stats"))
+
+    audit_parser = subparsers.add_parser("audit", help=t("cli.help.audit"))
+    audit_sub = audit_parser.add_subparsers(
+        dest="audit_action", help=t("cli.help.audit.action")
+    )
+
+    audit_log = audit_sub.add_parser("log", help=t("cli.help.audit.log"))
+    audit_log.add_argument(
+        "--event",
+        default="",
+        help=t("cli.help.audit.log.event"),
+    )
+    audit_log.add_argument(
+        "--status",
+        default="",
+        help=t("cli.help.audit.log.status"),
+    )
+    audit_log.add_argument(
+        "--since",
+        default="",
+        help=t("cli.help.audit.log.since"),
+    )
+    audit_log.add_argument(
+        "--limit",
+        type=int,
+        default=50,
+        help=t("cli.help.audit.log.limit"),
+    )
+
+    audit_sub.add_parser("stats", help=t("cli.help.audit.stats"))
+
+    audit_cleanup = audit_sub.add_parser("cleanup", help=t("cli.help.audit.cleanup"))
+    audit_cleanup.add_argument(
+        "--keep-days",
+        type=int,
+        default=90,
+        help=t("cli.help.audit.cleanup.keep_days"),
+    )
+
+    hooks_parser = subparsers.add_parser("hooks", help=t("cli.help.hooks"))
+    hooks_sub = hooks_parser.add_subparsers(
+        dest="hooks_action", help=t("cli.help.hooks.action")
+    )
+    hooks_run = hooks_sub.add_parser("run", help=t("cli.help.hooks.run"))
+    hooks_run.add_argument(
+        "hook_type",
+        choices=["pre", "post"],
+        help=t("cli.help.hooks.run.type"),
+    )
+    hooks_run.add_argument(
+        "--timeout",
+        type=int,
+        default=None,
+        help=t("cli.help.hooks.run.timeout"),
+    )
+
+    # Profile 子命令
+    profile_parser = subparsers.add_parser("profile", help=t("cli.help.profile"))
+    profile_sub = profile_parser.add_subparsers(
+        dest="profile_action", help=t("cli.help.profile.action")
+    )
+    profile_sub.add_parser("list", help=t("cli.help.profile.action"))
+
+    profile_create = profile_sub.add_parser(
+        "create", help=t("cli.help.profile.create.name")
+    )
+    profile_create.add_argument("name", help=t("cli.help.profile.create.name"))
+
+    profile_delete = profile_sub.add_parser(
+        "delete", help=t("cli.help.profile.delete.name")
+    )
+    profile_delete.add_argument("name", help=t("cli.help.profile.delete.name"))
+
+    profile_use = profile_sub.add_parser("use", help=t("cli.help.profile.use.name"))
+    profile_use.add_argument("name", help=t("cli.help.profile.use.name"))
+
+    profile_export = profile_sub.add_parser(
+        "export", help=t("cli.help.profile.export.name")
+    )
+    profile_export.add_argument("name", help=t("cli.help.profile.export.name"))
+    profile_export.add_argument("path", help=t("cli.help.profile.export.path"))
+
+    profile_import = profile_sub.add_parser(
+        "import", help=t("cli.help.profile.import.path")
+    )
+    profile_import.add_argument("path", help=t("cli.help.profile.import.path"))
+    profile_import.add_argument(
+        "--name", default="", help=t("cli.help.profile.import.name")
+    )
 
     return parser
 
@@ -1103,26 +1209,103 @@ def _handle_restore(args, config, manager) -> int:
             return 1
         target_dir = args.backup_file or ""
         if not target_dir:
-            print(t("cli.help.restore.dir"))
-            return 1
+            # --list / --search / --stats 不需要 target_dir
+            if not (
+                args.list
+                or getattr(args, "search", None)
+                or getattr(args, "stats", False)
+            ):
+                print(t("cli.help.restore.dir"))
+                return 1
     else:
         backup_path = args.backup_file or ""
         target_dir = args.target_dir or ""
-        if not backup_path or not target_dir:
+        # --list / --search / --stats 不需要 target_dir
+        if not backup_path or (
+            not target_dir
+            and not args.list
+            and not getattr(args, "search", None)
+            and not getattr(args, "stats", False)
+        ):
             parser = get_parser()
             parser.print_help()
             return 1
+
+    # 检查备份文件是否存在
+    if not os.path.isfile(backup_path):
+        print(t("err.file.not_found", path=backup_path))
+        return 1
+
     if args.list:
         from sbackup.compression import list_backup_contents
 
         print(list_backup_contents(backup_path, args.password))
         return 0
-    result = restore_backup(
-        backup_path,
-        target_dir,
-        args.password,
-        select_pattern=getattr(args, "select", "") or "",
-    )
+
+    # --search: 使用 SelectiveRestore 搜索文件
+    search_keyword = getattr(args, "search", None)
+    if search_keyword:
+        from sbackup.selective import SelectiveRestore
+
+        sr = SelectiveRestore(backup_path, args.password)
+        results = sr.search(search_keyword)
+        if results:
+            print(
+                t(
+                    "cmd.restore.search.found",
+                    count=len(results),
+                )
+            )
+            for f in results:
+                print(f"  {f['name']}")
+        else:
+            print(
+                t(
+                    "cmd.restore.search.no_results",
+                    keyword=search_keyword,
+                    path=backup_path,
+                )
+            )
+        return 0 if results else 1
+
+    # --stats: 使用 SelectiveRestore 显示统计信息
+    if getattr(args, "stats", False):
+        from sbackup.selective import SelectiveRestore
+
+        sr = SelectiveRestore(backup_path, args.password)
+        stats = sr.get_stats()
+        print(t("cmd.restore.stats.header", path=backup_path))
+        print(t("cmd.restore.stats.files", count=stats["total_files"]))
+        print(t("cmd.restore.stats.dirs", count=stats["total_dirs"]))
+        print(t("cmd.restore.stats.size", size=stats["total_size"]))
+        if stats["formats"]:
+            print(t("cmd.restore.stats.formats"))
+            for ext, count in sorted(stats["formats"].items()):
+                print(t("cmd.restore.stats.format_item", ext=ext, count=count))
+        return 0
+
+    # --select: 选择性恢复
+    select_patterns = getattr(args, "select", None)
+    if select_patterns:
+        from sbackup.selective import SelectiveRestore
+
+        sr = SelectiveRestore(backup_path, args.password)
+        extracted_count, extracted_paths = sr.extract_files(select_patterns, target_dir)
+        patterns_str = ", ".join(select_patterns)
+        if extracted_count > 0:
+            print(
+                t(
+                    "cmd.restore.selective.success",
+                    count=extracted_count,
+                    target=target_dir,
+                )
+            )
+        else:
+            print(t("restore.no_match", pattern=patterns_str))
+        return 0 if extracted_count > 0 else 1
+
+    # 默认：还原全部
+    result = restore_backup(backup_path, target_dir, args.password)
     return 0 if result["success"] else 1
 
 
@@ -1806,6 +1989,144 @@ def _handle_task(args, config, manager) -> int:
         return 1
 
 
+def _handle_audit(args, config, manager) -> int:
+    """处理 audit 子命令"""
+    from sbackup.audit import AuditLogger
+
+    logger_a = AuditLogger()
+
+    action = getattr(args, "audit_action", None)
+
+    if action == "log":
+        entries = logger_a.query(
+            event=args.event,
+            status=args.status,
+            since=args.since,
+            limit=args.limit,
+        )
+        print(logger_a.format_entries(entries, lang=config.lang))
+        return 0
+
+    elif action == "stats":
+        stats = logger_a.get_stats()
+        print(logger_a.format_stats(stats, lang=config.lang))
+        return 0
+
+    elif action == "cleanup":
+        removed = logger_a.cleanup(keep_days=args.keep_days)
+        if removed > 0:
+            print(t("cmd.audit.cleanup.done", count=removed))
+        else:
+            print(t("cmd.audit.cleanup.none"))
+        return 0
+
+    parser = get_parser()
+    parser.parse_args(["audit", "--help"])
+    return 1
+
+
+def _handle_hooks(args, config, manager) -> int:
+    """处理 hooks 子命令：手动执行 pre/post hooks"""
+    from sbackup.hooks import HookRunner
+
+    action = getattr(args, "hooks_action", None)
+
+    if action == "run":
+        hook_type = args.hook_type
+        timeout = args.timeout if args.timeout is not None else config.hook_timeout
+        hooks = config.pre_hooks if hook_type == "pre" else config.post_hooks
+
+        if not hooks:
+            print(t("cmd.hooks.no_hooks", type=hook_type))
+            return 0
+
+        runner = HookRunner(
+            pre_hooks=hooks if hook_type == "pre" else [],
+            post_hooks=hooks if hook_type == "post" else [],
+            timeout=timeout,
+        )
+        results = runner.run_hooks(hook_type)
+        print(runner.format_results(results, lang=config.lang))
+        failed = sum(1 for r in results if not r.success)
+        return 1 if failed > 0 else 0
+
+    parser = get_parser()
+    parser.parse_args(["hooks", "--help"])
+    return 1
+
+
+def _handle_profile(args, config, manager) -> int:
+    """处理 profile 子命令"""
+    from sbackup.profile import ProfileManager
+
+    pm = ProfileManager()
+    action = getattr(args, "profile_action", None)
+
+    if action == "list":
+        profiles = pm.list_profiles()
+        if not profiles:
+            print(t("cmd.profile.list.empty"))
+            return 0
+        print(t("cmd.profile.list.header"))
+        for name, cfg in profiles.items():
+            print(t("cmd.profile.list.item", name=name))
+            # 显示关键配置摘要
+            fields = []
+            for key in ("folder_path", "compression_format", "password"):
+                if key in cfg:
+                    val = cfg[key]
+                    if key == "password" and val:
+                        val = "***"
+                    fields.append(f"{key}: {val}")
+            if fields:
+                print(t("cmd.profile.list.detail", fields=", ".join(fields)))
+        return 0
+
+    elif action == "create":
+        if pm.save_profile(args.name, config):
+            print(t("cmd.profile.created", name=args.name))
+            return 0
+        return 1
+
+    elif action == "delete":
+        if pm.delete_profile(args.name):
+            print(t("cmd.profile.deleted", name=args.name))
+            return 0
+        print(t("cmd.profile.not_found", name=args.name))
+        return 1
+
+    elif action == "use":
+        merged = pm.activate_profile(args.name)
+        if merged is None:
+            print(t("cmd.profile.not_found", name=args.name))
+            return 1
+        print(t("cmd.profile.activated", name=args.name))
+        # 输出合并后配置摘要
+        print(f"  folder_path: {merged.folder_path}")
+        print(f"  compression_format: {merged.compression_format}")
+        return 0
+
+    elif action == "export":
+        if pm.export_profile(args.name, args.path):
+            print(t("cmd.profile.exported", name=args.name, path=args.path))
+            return 0
+        print(t("cmd.profile.not_found", name=args.name))
+        return 1
+
+    elif action == "import":
+        name = getattr(args, "name", "")
+        if pm.import_profile(args.path, name):
+            imported_name = name or os.path.splitext(os.path.basename(args.path))[0]
+            print(t("cmd.profile.imported", name=imported_name))
+            return 0
+        print(t("cmd.profile.import_failed", path=args.path))
+        return 1
+
+    parser = get_parser()
+    parser.parse_args(["profile", "--help"])
+    return 1
+
+
 _COMMAND_HANDLERS: dict[str, callable] = {
     "version": _handle_version,
     "wizard": _handle_wizard,
@@ -1842,6 +2163,9 @@ _COMMAND_HANDLERS: dict[str, callable] = {
     "completion": _handle_completion,
     "integrity": _handle_integrity,
     "task": _handle_task,
+    "audit": _handle_audit,
+    "hooks": _handle_hooks,
+    "profile": _handle_profile,
 }
 
 
@@ -1886,6 +2210,18 @@ def run() -> int:
     if args.format is not None:
         save_format(args.format)
         config.compression_format = args.format.upper().replace(".", "_")
+
+    # --profile 全局参数：临时合并 profile 配置到 config
+    profile_name = getattr(args, "profile", None)
+    if profile_name:
+        from sbackup.profile import ProfileManager
+
+        pm = ProfileManager()
+        merged = pm.activate_profile(profile_name)
+        if merged is None:
+            print(t("cmd.profile.not_found", name=profile_name))
+            return 1
+        config = merged
 
     if debug_enabled:
         logging.basicConfig(

@@ -152,6 +152,10 @@ class Config:
     rotation_keep_count: int = 0
     rotation_keep_days: int = 0
     rotation_keep_daily: int = 0
+    # Pre/Post Backup Hooks
+    pre_hooks: list[str] = field(default_factory=list)
+    post_hooks: list[str] = field(default_factory=list)
+    hook_timeout: int = 300
     # 内部字段：配置校验和（用于检测意外修改）
     _config_checksum: str = ""
 
@@ -217,6 +221,11 @@ def load_config(config_file: str = "config.json") -> Config:
     rotation_keep_days = rotation_config.get("keep_days", 0)
     rotation_keep_daily = rotation_config.get("keep_daily", 0)
 
+    hooks_config = config_data.get("hooks", {})
+    pre_hooks = hooks_config.get("pre", [])
+    post_hooks = hooks_config.get("post", [])
+    hook_timeout = hooks_config.get("timeout", 300)
+
     return Config(
         folder_path="",
         zipfile_path=None,
@@ -264,6 +273,9 @@ def load_config(config_file: str = "config.json") -> Config:
         rotation_keep_count=rotation_keep_count,
         rotation_keep_days=rotation_keep_days,
         rotation_keep_daily=rotation_keep_daily,
+        pre_hooks=pre_hooks,
+        post_hooks=post_hooks,
+        hook_timeout=hook_timeout,
     )
 
 

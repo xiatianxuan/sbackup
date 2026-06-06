@@ -537,6 +537,11 @@ class BackupManager:
 
             dedup_store = DedupStore(os.path.dirname(self.data_file))
 
+        # 初始化审计日志
+        from sbackup.audit import AuditLogger
+
+        audit = AuditLogger()
+
         backup_count = 0
         verify_failures = 0
         uploaded_files = []
@@ -544,6 +549,20 @@ class BackupManager:
         if len(tasks) > 1:
             # 并行备份多个策略
             logger.debug(t("log.parallel.backup"), len(tasks))
+            # 记录每个任务的开始时间和审计条目
+            task_starts: dict[str, float] = {}
+            task_audits: dict[str, object] = {}
+            for task in tasks:
+                t_key = task[0]
+                t_entry = task[1]
+                t_fmt = t_entry.compression_format or config.compression_format
+                task_starts[t_key] = time.monotonic()
+                task_audits[t_key] = audit.log(
+                    "backup_start",
+                    source_path=t_key,
+                    target_path=t_entry.target,
+                    format=t_fmt,
+                )
             with ThreadPoolExecutor() as executor:
                 futures = {
                     executor.submit(self._do_backup, *task): task for task in tasks
@@ -566,6 +585,9 @@ class BackupManager:
                         _,
                         _,
                     ) = futures[future]
+                    task_duration = time.monotonic() - task_starts.get(
+                        key, time.monotonic()
+                    )
                     try:
                         result = future.result()
                     except Exception as e:
@@ -607,6 +629,34 @@ class BackupManager:
                         if verify and result.get("path"):
                             if not self._verify_single(result["path"], password):
                                 verify_failures += 1
+                        # 审计：备份完成
+                        audit.log(
+                            "backup_complete",
+                            source_path=key,
+                            target_path=entry.target,
+                            format=entry.compression_format
+                            or config.compression_format,
+                            files_count=result.get("files_count", 0),
+                            backup_size=result.get("size_bytes", 0),
+                            duration=task_duration,
+                        )
+                    else:
+                        # 审计：备份失败
+                        error_msg = ""
+                        if result and result.get("error"):
+                            error_msg = str(result["error"])
+                        elif result and result.get("message"):
+                            error_msg = str(result["message"])
+                        audit.log(
+                            "backup_failed",
+                            source_path=key,
+                            target_path=entry.target,
+                            format=entry.compression_format
+                            or config.compression_format,
+                            status="failed",
+                            error_message=error_msg,
+                            duration=task_duration,
+                        )
         else:
             # 单策略串行执行
             for (
@@ -626,6 +676,15 @@ class BackupManager:
                 chmeta,
                 threads_val,
             ) in tasks:
+                # 审计：备份开始
+                task_start = time.monotonic()
+                fmt = entry.compression_format or config.compression_format
+                audit.log(
+                    "backup_start",
+                    source_path=key,
+                    target_path=entry.target,
+                    format=fmt,
+                )
                 result = self._do_backup(
                     key,
                     entry,
@@ -643,6 +702,7 @@ class BackupManager:
                     chmeta,
                     threads_val,
                 )
+                task_duration = time.monotonic() - task_start
                 if result and result.get("success"):
                     entry.mtime = current_mtime
                     self._set_entry(key, entry)
@@ -677,6 +737,32 @@ class BackupManager:
                     if verify and result.get("path"):
                         if not self._verify_single(result["path"], password):
                             verify_failures += 1
+                    # 审计：备份完成
+                    audit.log(
+                        "backup_complete",
+                        source_path=key,
+                        target_path=entry.target,
+                        format=fmt,
+                        files_count=result.get("files_count", 0),
+                        backup_size=result.get("size_bytes", 0),
+                        duration=task_duration,
+                    )
+                else:
+                    # 审计：备份失败
+                    error_msg = ""
+                    if result and result.get("error"):
+                        error_msg = str(result["error"])
+                    elif result and result.get("message"):
+                        error_msg = str(result["message"])
+                    audit.log(
+                        "backup_failed",
+                        source_path=key,
+                        target_path=entry.target,
+                        format=fmt,
+                        status="failed",
+                        error_message=error_msg,
+                        duration=task_duration,
+                    )
 
         elapsed = time.monotonic() - start_time
         total = backup_count + skip_count
@@ -858,36 +944,25 @@ class BackupManager:
 
     @staticmethod
     def _run_hooks(hooks: list[str], hook_type: str) -> None:
-        """执行钩子命令列表
+        """执行钩子命令列表（委托给 HookRunner）
+
         :param hooks: 命令列表
         :param hook_type: "pre" 或 "post"，用于日志标识
         """
-        import subprocess
-        import shlex
+        from sbackup.hooks import HookRunner
+        from sbackup.config import load_config
 
-        for cmd in hooks:
-            if not cmd:
-                continue
-            label = f"cmd.hook.{hook_type}_running"
-            print(t(label, command=cmd))
-            try:
-                result = subprocess.run(
-                    shlex.split(cmd),
-                    shell=False,
-                    timeout=300,
-                    capture_output=True,
-                    text=True,
-                )
-                if result.returncode != 0:
-                    logger.warning(
-                        t("cmd.hook.failed", command=cmd, error=result.stderr.strip())
-                    )
-            except subprocess.TimeoutExpired:
-                logger.warning(
-                    t("cmd.hook.failed", command=cmd, error="timeout (300s)")
-                )
-            except OSError as e:
-                logger.warning(t("cmd.hook.failed", command=cmd, error=str(e)))
+        config = load_config()
+        runner = HookRunner(
+            pre_hooks=hooks if hook_type == "pre" else [],
+            post_hooks=hooks if hook_type == "post" else [],
+            timeout=config.hook_timeout,
+        )
+        results = runner.run_hooks(hook_type)
+        # 记录结果摘要
+        for r in results:
+            if not r.success:
+                logger.warning("Hook failed: %s (rc=%s)", r.command, r.return_code)
 
     @staticmethod
     def _do_backup(
