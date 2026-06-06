@@ -229,6 +229,51 @@ def get_parser() -> argparse.ArgumentParser:
         default=False,
         help=t("cli.help.strict"),
     )
+    save_parser.add_argument(
+        "--multi-dest",
+        action="store_true",
+        default=False,
+        help=t("cli.help.save.multi_dest"),
+    )
+
+    multi_backup_parser = subparsers.add_parser(
+        "multi-backup", help=t("cli.help.multi_backup")
+    )
+    multi_backup_parser.add_argument("source", help=t("cli.help.multi_backup.source"))
+    multi_backup_parser.add_argument(
+        "local_target", help=t("cli.help.multi_backup.local_target")
+    )
+    multi_backup_parser.add_argument(
+        "--keep", type=int, default=0, help=t("cli.help.multi_backup.keep")
+    )
+    multi_backup_parser.add_argument(
+        "--keep-days",
+        type=int,
+        default=0,
+        help=t("cli.help.multi_backup.keep_days"),
+    )
+    multi_backup_parser.add_argument(
+        "--password",
+        default="",
+        help=t("cli.help.multi_backup.password"),
+    )
+    multi_backup_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        default=False,
+        help=t("cli.help.multi_backup.dry_run"),
+    )
+    multi_backup_parser.add_argument(
+        "--verify",
+        action="store_true",
+        default=False,
+        help=t("cli.help.multi_backup.verify"),
+    )
+    multi_backup_parser.add_argument(
+        "--name-template",
+        default=None,
+        help=t("cli.help.multi_backup.name_template"),
+    )
 
     compress_parser = subparsers.add_parser("compress", help=t("cli.help.compress"))
     compress_parser.add_argument("source", help=t("cli.help.compress.source"))
@@ -494,12 +539,43 @@ def get_parser() -> argparse.ArgumentParser:
         "--webdav", action="store_true", default=False, help=t("cli.help.remote.webdav")
     )
 
-    export_parser = subparsers.add_parser("export", help=t("cli.help.export"))
-    export_parser.add_argument(
-        "file",
-        nargs="?",
-        default="sbackup_export.json",
-        help=t("cli.help.export.file"),
+    export_parser = subparsers.add_parser("export", help=t("cli.help.metadata_export"))
+    export_sub = export_parser.add_subparsers(
+        dest="export_action", help=t("cli.help.metadata_export.action")
+    )
+    export_history = export_sub.add_parser(
+        "history", help=t("cli.help.metadata_export.history")
+    )
+    export_history.add_argument("output", help=t("cli.help.metadata_export.output"))
+    export_history.add_argument(
+        "--strategy", default="", help=t("cli.help.metadata_export.strategy")
+    )
+    export_history.add_argument(
+        "--format",
+        default="csv",
+        choices=["csv", "json"],
+        help=t("cli.help.metadata_export.format"),
+    )
+    export_audit = export_sub.add_parser(
+        "audit", help=t("cli.help.metadata_export.audit")
+    )
+    export_audit.add_argument("output", help=t("cli.help.metadata_export.output"))
+    export_audit.add_argument(
+        "--event", default="", help=t("cli.help.metadata_export.event")
+    )
+    export_audit.add_argument(
+        "--format",
+        default="csv",
+        choices=["csv", "json"],
+        help=t("cli.help.metadata_export.format"),
+    )
+    export_all = export_sub.add_parser("all", help=t("cli.help.metadata_export.all"))
+    export_all.add_argument("output", help=t("cli.help.metadata_export.output"))
+    export_all.add_argument(
+        "--format",
+        default="json",
+        choices=["csv", "json"],
+        help=t("cli.help.metadata_export.format"),
     )
 
     import_parser = subparsers.add_parser("import", help=t("cli.help.import"))
@@ -539,6 +615,25 @@ def get_parser() -> argparse.ArgumentParser:
     )
     search_parser.add_argument(
         "--password", default="", help=t("cli.help.search.password")
+    )
+
+    xsearch_parser = subparsers.add_parser("xsearch", help=t("cli.help.xsearch"))
+    xsearch_parser.add_argument("dirs", nargs="+", help=t("cli.help.xsearch.dirs"))
+    xsearch_parser.add_argument(
+        "--keyword", default=None, help=t("cli.help.xsearch.keyword")
+    )
+    xsearch_parser.add_argument(
+        "--pattern", default=None, help=t("cli.help.xsearch.pattern")
+    )
+    xsearch_parser.add_argument("--ext", default=None, help=t("cli.help.xsearch.ext"))
+    xsearch_parser.add_argument(
+        "--password", default="", help=t("cli.help.xsearch.password")
+    )
+    xsearch_parser.add_argument(
+        "--lang",
+        default=None,
+        choices=["zh_CN", "en_US"],
+        help=t("cli.help.xsearch.output_lang"),
     )
 
     versions_parser = subparsers.add_parser("versions", help=t("cli.help.versions"))
@@ -690,6 +785,25 @@ def get_parser() -> argparse.ArgumentParser:
         type=int,
         default=6,
         help=t("cli.help.diskcheck.level"),
+    )
+
+    benchmark_parser = subparsers.add_parser("benchmark", help=t("cli.help.benchmark"))
+    benchmark_parser.add_argument("path", help=t("cli.help.benchmark.path"))
+    benchmark_parser.add_argument(
+        "--levels",
+        default=None,
+        help=t("cli.help.benchmark.levels"),
+    )
+    benchmark_parser.add_argument(
+        "--quick",
+        action="store_true",
+        default=False,
+        help=t("cli.help.benchmark.quick"),
+    )
+    benchmark_parser.add_argument(
+        "--password",
+        default="",
+        help=t("cli.help.benchmark.password"),
     )
 
     subparsers.add_parser("version", help=t("cli.help.version"))
@@ -971,6 +1085,10 @@ def _handle_list(args, config, manager) -> int:
 def _handle_save(args, config, manager) -> int:
     from sbackup.lock import BackupLock
 
+    # --multi-dest 模式：委托给 multi_dest 模块
+    if getattr(args, "multi_dest", False):
+        return _run_multi_dest_save(args, config, manager)
+
     if args.password:
         print(t("warn.password_in_cli"), file=sys.stderr)
     lock = BackupLock(os.path.dirname(config.data_file) or ".")
@@ -1067,6 +1185,131 @@ def _handle_save(args, config, manager) -> int:
     finally:
         lock.release()
     return 0
+
+
+def _run_multi_dest_save(args, config, manager) -> int:
+    """在 save --multi-dest 模式下执行多目标备份"""
+    from sbackup.lock import BackupLock
+    from sbackup.multi_dest import MultiDestBackup
+
+    if args.password:
+        config.password = args.password
+
+    lock = BackupLock(os.path.dirname(config.data_file) or ".")
+    if not lock.acquire():
+        print(t("err.lock.conflict"))
+        return 1
+    try:
+        multi = MultiDestBackup(config)
+        destinations = multi.get_enabled_destinations()
+        remote_count = len(destinations) - 1  # 减去 local
+
+        # 找到第一个策略条目执行本地备份
+        from sbackup.auto_save import BackupEntry
+
+        for key, raw in manager.data.items():
+            if key in ("_history", "_file_meta", "_chunk_meta"):
+                continue
+            entry = BackupEntry.from_list(raw)
+            source_dir = key
+            target_dir = entry.target
+
+            print(
+                t(
+                    "multi_dest.started",
+                    source=source_dir,
+                    targets=", ".join(destinations),
+                )
+            )
+
+            if remote_count > 0:
+                print(t("multi_dest.uploading", count=remote_count))
+
+            results = multi.execute_all(source_dir, target_dir)
+            print(multi.format_results(results, lang=config.lang))
+
+            # 本地备份失败则中止
+            if not any(r.success for r in results if r.name == "local"):
+                print(t("multi_dest.aborted"))
+                return 1
+
+            # 执行后置钩子
+            if config.post_hooks:
+                from sbackup.hooks import HookRunner
+
+                runner = HookRunner(
+                    post_hooks=config.post_hooks,
+                    timeout=config.hook_timeout,
+                )
+                hook_results = runner.run_hooks("post")
+                print(runner.format_results(hook_results, lang=config.lang))
+
+        print(t("multi_dest.complete"))
+        return 0
+    finally:
+        lock.release()
+
+
+def _handle_multi_backup(args, config, manager) -> int:
+    """处理 multi-backup 子命令：多目标同时备份"""
+    from sbackup.lock import BackupLock
+    from sbackup.multi_dest import MultiDestBackup
+
+    source = parse_path(args.source)
+    local_target = parse_path(args.local_target)
+
+    if not os.path.isdir(source):
+        print(t("err.folder.invalid", path=source))
+        return 1
+
+    if args.password:
+        config.password = args.password
+    if args.name_template:
+        config.name_template = args.name_template
+
+    lock = BackupLock(os.path.dirname(config.data_file) or ".")
+    if not lock.acquire():
+        print(t("err.lock.conflict"))
+        return 1
+    try:
+        multi = MultiDestBackup(config)
+        destinations = multi.get_enabled_destinations()
+        remote_count = len(destinations) - 1
+
+        print(
+            t(
+                "multi_dest.started",
+                source=source,
+                targets=", ".join(destinations),
+            )
+        )
+
+        if remote_count > 0:
+            print(t("multi_dest.uploading", count=remote_count))
+
+        results = multi.execute_all(source, local_target)
+        print(multi.format_results(results, lang=config.lang))
+
+        # 检查本地备份是否成功
+        if not any(r.success for r in results if r.name == "local"):
+            print(t("multi_dest.aborted"))
+            return 1
+
+        # 执行后置钩子
+        if config.post_hooks:
+            from sbackup.hooks import HookRunner
+
+            runner = HookRunner(
+                post_hooks=config.post_hooks,
+                timeout=config.hook_timeout,
+            )
+            hook_results = runner.run_hooks("post")
+            print(runner.format_results(hook_results, lang=config.lang))
+
+        print(t("multi_dest.complete"))
+        return 0
+    finally:
+        lock.release()
 
 
 def _handle_compress(args, config, manager) -> int:
@@ -1550,10 +1793,76 @@ def _handle_search(args, config, manager) -> int:
     return 0
 
 
+def _handle_xsearch(args, config, manager) -> int:
+    from sbackup.cross_search import CrossSearcher
+
+    searcher = CrossSearcher(args.dirs, password=args.password)
+
+    if args.keyword:
+        results = searcher.search(args.keyword)
+    elif args.pattern:
+        results = searcher.search_by_pattern(args.pattern)
+    elif args.ext:
+        results = searcher.search_by_extension(args.ext)
+    else:
+        print(t("cmd.xsearch.no_query"))
+        return 1
+
+    output_lang = args.lang if args.lang else config.lang
+    print(searcher.format_results(results, lang=output_lang))
+    return 0 if results else 1
+
+
 def _handle_export(args, config, manager) -> int:
-    count = manager.export_strategies(args.file)
-    if count > 0:
-        print(t("cmd.export.success", count=count, path=args.file))
+    from sbackup.export import MetadataExporter
+
+    action = getattr(args, "export_action", None)
+    if not action:
+        print(t("cli.help.metadata_export.action"))
+        return 1
+
+    exporter = MetadataExporter(data_file=manager.data_file)
+
+    if action == "history":
+        fmt = getattr(args, "format", "csv")
+        strategy = getattr(args, "strategy", "")
+        output = args.output
+        if fmt == "json":
+            if not output.endswith(".json"):
+                output += ".json"
+            count = exporter.export_history_json(output, strategy)
+        else:
+            if not output.endswith(".csv"):
+                output += ".csv"
+            count = exporter.export_history_csv(output, strategy)
+        print(t("cmd.metadata_export.history_done", count=count, path=output))
+    elif action == "audit":
+        fmt = getattr(args, "format", "csv")
+        event = getattr(args, "event", "")
+        output = args.output
+        if fmt == "json":
+            if not output.endswith(".json"):
+                output += ".json"
+            count = exporter.export_audit_json(output, event)
+        else:
+            if not output.endswith(".csv"):
+                output += ".csv"
+            count = exporter.export_audit_csv(output, event)
+        print(t("cmd.metadata_export.audit_done", count=count, path=output))
+    elif action == "all":
+        fmt = getattr(args, "format", "json")
+        output = args.output
+        if fmt == "json":
+            if not output.endswith(".json"):
+                output += ".json"
+        else:
+            if not output.endswith(".csv"):
+                output += ".csv"
+        count = exporter.export_combined(output, fmt)
+        print(t("cmd.metadata_export.combined_done", count=count, path=output))
+    else:
+        print(t("cli.help.metadata_export.action"))
+        return 1
     return 0
 
 
@@ -1832,6 +2141,43 @@ def _handle_diskcheck(args, config, manager) -> int:
     report = checker.format_report(info, lang=config.lang)
     print(report)
     return 0 if info.enough else 1
+
+
+def _handle_benchmark(args, config, manager) -> int:
+    """执行压缩基准测试"""
+    from sbackup.benchmark import BenchmarkRunner
+
+    source = parse_path(args.path)
+    if not os.path.isdir(source):
+        print(t("err.folder.invalid", path=source))
+        return 1
+
+    # 检查目录是否有文件
+    has_files = False
+    for _dirpath, _dirnames, filenames in os.walk(source):
+        if filenames:
+            has_files = True
+            break
+    if not has_files:
+        print(t("benchmark.empty_source", path=source))
+        return 1
+
+    runner = BenchmarkRunner(source, password=args.password or "")
+
+    if args.quick:
+        results = runner.run_quick()
+    else:
+        levels = None
+        if args.levels:
+            try:
+                levels = [int(x.strip()) for x in args.levels.split(",")]
+            except ValueError:
+                print(t("err.argparse.invalid_int"))
+                return 1
+        results = runner.run_all(levels=levels)
+
+    print(runner.format_results(results, lang=config.lang))
+    return 0
 
 
 def _handle_completion(args, config, manager) -> int:
@@ -2138,6 +2484,7 @@ _COMMAND_HANDLERS: dict[str, callable] = {
     "list": _handle_list,
     "history": _handle_list,
     "save": _handle_save,
+    "multi-backup": _handle_multi_backup,
     "watch": _handle_watch,
     "compress": _handle_compress,
     "restore": _handle_restore,
@@ -2157,9 +2504,11 @@ _COMMAND_HANDLERS: dict[str, callable] = {
     "config": _handle_config_cmd,
     "report": _handle_report,
     "search": _handle_search,
+    "xsearch": _handle_xsearch,
     "clean": _handle_clean,
     "rotate": _handle_rotate,
     "diskcheck": _handle_diskcheck,
+    "benchmark": _handle_benchmark,
     "completion": _handle_completion,
     "integrity": _handle_integrity,
     "task": _handle_task,
