@@ -572,6 +572,7 @@ def get_parser() -> argparse.ArgumentParser:
     config_unlock.add_argument(
         "--password", default="", help=t("cli.help.config_cmd.unlock.password")
     )
+    config_sub.add_parser("validate", help=t("cli.help.config_cmd.validate"))
 
     clean_parser = subparsers.add_parser("clean", help=t("cli.help.clean"))
     clean_parser.add_argument(
@@ -601,6 +602,56 @@ def get_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("version", help=t("cli.help.version"))
 
     subparsers.add_parser("wizard", help=t("cli.help.wizard"))
+
+    integrity_parser = subparsers.add_parser("integrity", help=t("cli.help.integrity"))
+    integrity_sub = integrity_parser.add_subparsers(
+        dest="integrity_action", help=t("cli.help.integrity.action")
+    )
+    integrity_gen = integrity_sub.add_parser(
+        "generate", help=t("cli.help.integrity.generate")
+    )
+    integrity_gen.add_argument("path", help=t("cli.help.integrity.path"))
+    integrity_verify = integrity_sub.add_parser(
+        "verify", help=t("cli.help.integrity.verify")
+    )
+    integrity_verify.add_argument("path", help=t("cli.help.integrity.path"))
+
+    task_parser = subparsers.add_parser("task", help=t("cli.help.task"))
+    task_sub = task_parser.add_subparsers(
+        dest="task_action", help=t("cli.help.task.action")
+    )
+
+    task_add = task_sub.add_parser("add", help=t("cli.help.task.add"))
+    task_add.add_argument("name", help=t("cli.help.task.add.name"))
+    task_add.add_argument("folder", help=t("cli.help.task.add.folder"))
+    task_add.add_argument(
+        "--format",
+        default="ZIP",
+        choices=["zip", "tar", "tar.gz", "tar.bz2", "tar.xz", "tar.zst", "7z"],
+        help=t("cli.help.task.add.format"),
+    )
+    task_add.add_argument(
+        "--output",
+        default=None,
+        help=t("cli.help.task.add.output"),
+    )
+
+    task_list = task_sub.add_parser("list", help=t("cli.help.task.list"))
+    task_list.add_argument(
+        "--status",
+        default=None,
+        choices=["pending", "running", "completed", "failed"],
+        help=t("cli.help.task.list.status"),
+    )
+
+    task_sub.add_parser("run", help=t("cli.help.task.run"))
+    task_sub.add_parser("run-all", help=t("cli.help.task.run_all"))
+
+    task_cancel = task_sub.add_parser("cancel", help=t("cli.help.task.cancel"))
+    task_cancel.add_argument("id", help=t("cli.help.task.cancel.id"))
+
+    task_sub.add_parser("clear", help=t("cli.help.task.clear"))
+    task_sub.add_parser("stats", help=t("cli.help.task.stats"))
 
     return parser
 
@@ -1253,6 +1304,25 @@ def _handle_config_cmd(args, config, manager) -> int:
             return 0
         print(t("cmd.config.wrong_password"))
         return 1
+    elif args.config_action == "validate":
+        from sbackup.schema import validate_config_file
+
+        is_valid, errors, warnings = validate_config_file(config)
+        if errors:
+            print(t("cmd.config.validate.errors"))
+            for e in errors:
+                print(f"  [{e.severity}] {e.field}: {e.message}")
+        if warnings:
+            print(t("cmd.config.validate.warnings"))
+            for w in warnings:
+                print(f"  [{w.severity}] {w.field}: {w.message}")
+        if is_valid and not warnings:
+            print(t("cmd.config.validate.passed"))
+        elif is_valid:
+            print(t("cmd.config.validate.passed_with_warnings"))
+        else:
+            print(t("cmd.config.validate.failed"))
+        return 0 if is_valid else 1
     print(t("cli.help.config_cmd.action"))
     return 1
 
@@ -1294,10 +1364,146 @@ def _handle_completion(args, config, manager) -> int:
     return 0
 
 
+def _handle_integrity(args, config, manager) -> int:
+    from sbackup.integrity import generate_backup_integrity, verify_backup_integrity
+
+    action = getattr(args, "integrity_action", None)
+    path = parse_path(args.path)
+
+    if action == "generate":
+        try:
+            integrity_path = generate_backup_integrity(path)
+            print(t("cmd.integrity.generate.success", path=integrity_path))
+            return 0
+        except NotADirectoryError:
+            print(t("cmd.integrity.generate.not_dir", path=path))
+            return 1
+        except OSError as e:
+            print(t("err.os", error=e))
+            return 1
+
+    elif action == "verify":
+        all_ok, messages = verify_backup_integrity(path)
+        for msg in messages:
+            print(f"  {msg}")
+        if all_ok:
+            print(t("cmd.integrity.verify.success", path=path))
+        else:
+            print(t("cmd.integrity.verify.failed", path=path))
+        return 0 if all_ok else 1
+
+    else:
+        parser = get_parser()
+        parser.parse_args(["integrity", "--help"])
+        return 1
+
+
 def _handle_wizard(args, config, manager) -> int:
     from sbackup.wizard import run_wizard
 
     return run_wizard(config.data_file)
+
+
+def _handle_task(args, config, manager) -> int:
+    from sbackup.task_queue import TaskQueue
+
+    queue = TaskQueue()
+    action = getattr(args, "task_action", None)
+
+    if action == "add":
+        task_id = queue.add_task(
+            name=args.name,
+            folder_path=args.folder,
+            zipfile_path=args.output,
+            compression_format=args.format,
+        )
+        print(t("task_queue.added", name=args.name, id=task_id))
+        return 0
+
+    elif action == "list":
+        status_filter = getattr(args, "status", None)
+        tasks = queue.list_tasks(status=status_filter)
+        if not tasks:
+            print(t("task_queue.list.empty"))
+            return 0
+        print(t("task_queue.list.header", count=len(tasks)))
+        for task in tasks:
+            print(
+                t(
+                    "task_queue.list.item",
+                    status=task.status,
+                    name=task.name,
+                    id=task.id,
+                )
+            )
+            print(t("task_queue.list.item_detail", folder=task.folder_path))
+            if task.result_path:
+                print(t("task_queue.list.item_result", result=task.result_path))
+            if task.error:
+                print(t("task_queue.list.item_error", error=task.error))
+            if task.created_at:
+                print(t("task_queue.list.item_time", created=task.created_at))
+        return 0
+
+    elif action == "run":
+        task = queue.run_next()
+        if task is None:
+            print(t("task_queue.run.none"))
+            return 0
+        if task.status == "completed":
+            print(t("task_queue.run.success", name=task.name, result=task.result_path))
+            return 0
+        else:
+            print(t("task_queue.run.failed", name=task.name, error=task.error))
+            return 1
+
+    elif action == "run-all":
+        executed = queue.run_all()
+        if not executed:
+            print(t("task_queue.run.none"))
+            return 0
+        success = sum(1 for t in executed if t.status == "completed")
+        failed = len(executed) - success
+        print(
+            t(
+                "task_queue.run_all.done",
+                count=len(executed),
+                success=success,
+                failed=failed,
+            )
+        )
+        return 0 if failed == 0 else 1
+
+    elif action == "cancel":
+        if queue.cancel_task(args.id):
+            print(t("task_queue.cancelled.success", id=args.id))
+            return 0
+        else:
+            print(t("task_queue.cancelled.fail"))
+            return 1
+
+    elif action == "clear":
+        count = queue.clear_completed()
+        if count > 0:
+            print(t("task_queue.clear.done", count=count))
+        else:
+            print(t("task_queue.clear.none"))
+        return 0
+
+    elif action == "stats":
+        stats = queue.get_stats()
+        print(t("task_queue.stats.header"))
+        print(t("task_queue.stats.total", total=stats["total"]))
+        print(t("task_queue.stats.pending", pending=stats["pending"]))
+        print(t("task_queue.stats.running", running=stats["running"]))
+        print(t("task_queue.stats.completed", completed=stats["completed"]))
+        print(t("task_queue.stats.failed", failed=stats["failed"]))
+        return 0
+
+    else:
+        parser = get_parser()
+        parser.parse_args(["task", "--help"])
+        return 1
 
 
 _COMMAND_HANDLERS: dict[str, callable] = {
@@ -1331,6 +1537,8 @@ _COMMAND_HANDLERS: dict[str, callable] = {
     "search": _handle_search,
     "clean": _handle_clean,
     "completion": _handle_completion,
+    "integrity": _handle_integrity,
+    "task": _handle_task,
 }
 
 

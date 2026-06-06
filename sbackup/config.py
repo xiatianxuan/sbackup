@@ -148,6 +148,8 @@ class Config:
     smtp_to: str = ""
     smtp_tls: bool = True
     smtp_enabled: bool = False
+    # 内部字段：配置校验和（用于检测意外修改）
+    _config_checksum: str = ""
 
 
 def load_config(config_file: str = "config.json") -> Config:
