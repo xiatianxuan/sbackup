@@ -466,10 +466,6 @@ def get_parser() -> argparse.ArgumentParser:
     report_parser.add_argument(
         "-o", "--output", default="", help=t("cli.help.report.output")
     )
-    report_parser.add_argument(
-        "--format", choices=["text", "html"], default="text",
-        help=t("cli.help.report.format"),
-    )
 
     search_parser = subparsers.add_parser("search", help=t("cli.help.search"))
     search_parser.add_argument("pattern", help=t("cli.help.search.pattern"))
@@ -585,6 +581,8 @@ def get_parser() -> argparse.ArgumentParser:
     )
 
     subparsers.add_parser("version", help=t("cli.help.version"))
+
+    subparsers.add_parser("wizard", help=t("cli.help.wizard"))
 
     return parser
 
@@ -1043,10 +1041,6 @@ def _handle_remote(args, config, manager) -> int:
 
 
 def _handle_report(args, config, manager) -> int:
-    if args.format == "html":
-        output = args.output or ""
-        manager.export_html_report(output)
-        return 0
     report = manager.export_report(args.output)
     if not args.output:
         print(report)
@@ -1262,8 +1256,15 @@ def _handle_completion(args, config, manager) -> int:
     return 0
 
 
+def _handle_wizard(args, config, manager) -> int:
+    from sbackup.wizard import run_wizard
+
+    return run_wizard(config.data_file)
+
+
 _COMMAND_HANDLERS: dict[str, callable] = {
     "version": _handle_version,
+    "wizard": _handle_wizard,
     "add": _handle_add,
     "rm": _handle_rm,
     "remove": _handle_rm,
