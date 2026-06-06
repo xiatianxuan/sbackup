@@ -385,6 +385,8 @@ def handle_schedule(args, config) -> int:
     """处理 schedule 子命令"""
     if args.schedule_action == "export":
         return _export_schedule(args, config)
+    elif args.schedule_action == "install":
+        return _handle_schedule_install(args, config)
     print(t("cli.help.schedule.action"))
     return 1
 
@@ -530,3 +532,78 @@ def _generate_schtasks(interval_minutes: int) -> str:
         f'#   schtasks /create /tn "SbackupBackup" /xml sbackup_task.xml /f\n'
         f"\n{xml}"
     )
+
+
+def _handle_schedule_install(args, config) -> int:
+    """生成并打印安装系统调度服务的命令"""
+    sbackup_cmd = f"{sys.executable} -m sbackup"
+
+    if args.type == "systemd":
+        service_content = f"""[Unit]
+Description=sbackup periodic backup
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart={sbackup_cmd} save
+User={args.user or os.environ.get('USER', 'root')}
+
+[Install]
+WantedBy=multi-user.target
+"""
+        timer_content = f"""[Unit]
+Description=sbackup backup timer
+
+[Timer]
+OnCalendar=*:0/{args.interval}
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+"""
+        print(t("cmd.schedule.install.systemd"))
+        print()
+        print("# sbackup.service:")
+        print(service_content)
+        print("# sbackup.timer:")
+        print(timer_content)
+        print("# To install:")
+        print(f"  cat > /etc/systemd/system/sbackup.service << 'EOF'")
+        print(service_content.replace("'", "'\\''"))
+        print(f"  EOF")
+        print(f"  cat > /etc/systemd/system/sbackup.timer << 'EOF'")
+        print(timer_content.replace("'", "'\\''"))
+        print(f"  EOF")
+        print(f"  systemctl daemon-reload && systemctl enable --now sbackup.timer")
+
+    elif args.type == "schtasks":
+        cmdline = f"{sbackup_cmd} save"
+        print(t("cmd.schedule.install.schtasks_cmd", interval=args.interval, cmdline=cmdline))
+
+    elif args.type == "launchd":
+        plist = f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.sbackup.backup</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{sys.executable}</string>
+        <string>-m</string>
+        <string>sbackup</string>
+        <string>save</string>
+    </array>
+    <key>StartInterval</key>
+    <integer>{args.interval * 60}</integer>
+    <key>RunAtLoad</key>
+    <true/>
+</dict>
+</plist>"""
+        print(t("cmd.schedule.install.launchd"))
+        print()
+        print(plist)
+        print("# Save as ~/Library/LaunchAgents/com.sbackup.backup.plist")
+        print("# Then run: launchctl load ~/Library/LaunchAgents/com.sbackup.backup.plist")
+
+    return 0

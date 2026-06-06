@@ -495,6 +495,24 @@ def get_parser() -> argparse.ArgumentParser:
         "-o", "--output", default="", help=t("cli.help.schedule.output")
     )
 
+    schedule_install = schedule_sub.add_parser(
+        "install", help=t("cli.help.schedule.install")
+    )
+    schedule_install.add_argument(
+        "--type",
+        choices=["systemd", "schtasks", "launchd"],
+        default="systemd",
+        help=t("cli.help.schedule.install.type"),
+    )
+    schedule_install.add_argument(
+        "--interval", type=int, default=60,
+        help=t("cli.help.schedule.install.interval"),
+    )
+    schedule_install.add_argument(
+        "--user", default="",
+        help=t("cli.help.schedule.install.user"),
+    )
+
     webhook_parser = subparsers.add_parser("webhook", help=t("cli.help.webhook_cmd"))
     webhook_sub = webhook_parser.add_subparsers(
         dest="webhook_action", help=t("cli.help.webhook_cmd.action")
