@@ -10,13 +10,21 @@ from sbackup.hooks import HookResult, HookRunner
 
 
 def _make_python_cmd(script: str) -> str:
-    """创建跨平台的 Python 命令，避免引号转义问题"""
-    return f"{sys.executable} -c {script}"
+    """创建跨平台的 Python 命令
+
+    将可执行文件路径用双引号包裹，确保 shlex.split 在 posix 模式下
+    不会将 Windows 路径中的反斜杠解释为转义字符。
+    """
+    return f'"{sys.executable}" -c {script}'
 
 
+# 命令中不包含空格或分号，确保 shlex.split 正确解析
 _echo_cmd = _make_python_cmd("print(42)")
-_fail_cmd = _make_python_cmd("raise SystemExit(1)")
-_sleep_cmd = _make_python_cmd("__import__('time').sleep(10)")
+_fail_cmd = _make_python_cmd("exit(1)")
+# 超时命令使用 ping（无引号/分号问题）:
+#   Windows: ping -n 11 127.0.0.1 (~10s)
+#   Unix:    ping -c 11 127.0.0.1 (~10s)
+_sleep_cmd = "ping -n 11 127.0.0.1" if sys.platform == "win32" else "sleep 10"
 
 
 class TestHookResult(unittest.TestCase):

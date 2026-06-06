@@ -69,13 +69,15 @@ class HookRunner:
         start = time.monotonic()
         try:
             # 跨平台命令解析
-            if sys.platform == "win32":
-                try:
-                    args_list = shlex.split(command, posix=False)
-                except ValueError:
-                    args_list = [command]
-            else:
+            # posix=True（默认）：剥离引号，各平台行为一致
+            # Windows 上 shlex.split 可能对某些命令格式报 ValueError，回退到 [command]
+            try:
                 args_list = shlex.split(command)
+            except ValueError:
+                if sys.platform == "win32":
+                    args_list = [command]
+                else:
+                    raise
 
             result = subprocess.run(
                 args_list,
