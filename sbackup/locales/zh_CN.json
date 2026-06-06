@@ -366,8 +366,8 @@
     "err.webdav.not_found": "远程文件不存在: {path}",
     "err.webdav.delete": "删除远程文件失败 {path}: {error}",
     "err.webdav.list": "列出远程文件失败 {path}: {error}",
-    "restore.no_match": "没有匹配 \"{pattern}\" 的文件",
-    "cli.help.restore.select": "选择性还原：仅提取匹配模式的文件（支持 glob 通配符，如 \"*.py\" 或 \"src/main.py\"）",
+    "restore.no_match": '没有匹配 "{pattern}" 的文件',
+    "cli.help.restore.select": '选择性还原：仅提取匹配模式的文件（支持 glob 通配符，如 "*.py" 或 "src/main.py"）',
     "cli.help.schedule.type.schtasks": "Windows 计划任务",
     "cmd.schedule.schtasks.generated": "Windows 计划任务命令已生成",
     "cmd.hook.pre_running": "正在执行前置钩子: {command}",
@@ -402,5 +402,6 @@
     "cmd.list.tags.header": "备份标签:",
     "cmd.list.tags.empty": "暂无标签",
     "cli.help.dedup": "启用跨策略的基于内容哈希（SHA256）文件级去重",
-    "cmd.dedup.saved": "去重: 跳过 {count} 个重复文件，节省 {saved:.2f} MB"
+    "cmd.dedup.saved": "去重: 跳过 {count} 个重复文件，节省 {saved:.2f} MB",
+    "cli.help.report.format": "报告格式: text(文本) 或 html(网页)"
 }

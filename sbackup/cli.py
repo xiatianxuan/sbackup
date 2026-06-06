@@ -466,6 +466,10 @@ def get_parser() -> argparse.ArgumentParser:
     report_parser.add_argument(
         "-o", "--output", default="", help=t("cli.help.report.output")
     )
+    report_parser.add_argument(
+        "--format", choices=["text", "html"], default="text",
+        help=t("cli.help.report.format"),
+    )
 
     search_parser = subparsers.add_parser("search", help=t("cli.help.search"))
     search_parser.add_argument("pattern", help=t("cli.help.search.pattern"))
@@ -1039,6 +1043,10 @@ def _handle_remote(args, config, manager) -> int:
 
 
 def _handle_report(args, config, manager) -> int:
+    if args.format == "html":
+        output = args.output or ""
+        manager.export_html_report(output)
+        return 0
     report = manager.export_report(args.output)
     if not args.output:
         print(report)

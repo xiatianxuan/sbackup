@@ -363,8 +363,8 @@
     "err.webdav.not_found": "Remote file not found: {path}",
     "err.webdav.delete": "Failed to delete remote file {path}: {error}",
     "err.webdav.list": "Failed to list remote files {path}: {error}",
-    "restore.no_match": "No files matching \"{pattern}\"",
-    "cli.help.restore.select": "Selective restore: extract only files matching pattern (supports glob wildcards, e.g. \"*.py\" or \"src/main.py\")",
+    "restore.no_match": 'No files matching "{pattern}"',
+    "cli.help.restore.select": 'Selective restore: extract only files matching pattern (supports glob wildcards, e.g. "*.py" or "src/main.py")',
     "cli.help.schedule.type.schtasks": "Windows Task Scheduler",
     "cmd.schedule.schtasks.generated": "Windows Task Scheduler command generated",
     "cmd.hook.pre_running": "Running pre-backup hook: {command}",
@@ -399,5 +399,6 @@
     "cmd.list.tags.header": "Backup Tags:",
     "cmd.list.tags.empty": "No tags found",
     "cli.help.dedup": "Enable content-based deduplication across backup strategies (SHA256)",
-    "cmd.dedup.saved": "Deduplication: skipped {count} duplicate file(s), saved {saved:.2f} MB"
+    "cmd.dedup.saved": "Deduplication: skipped {count} duplicate file(s), saved {saved:.2f} MB",
+    "cli.help.report.format": "Report format: text (default) or html"
 }
