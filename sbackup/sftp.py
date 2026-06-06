@@ -44,7 +44,7 @@ class SFTPClient:
         self._sftp = None
 
     def connect(self) -> None:
-        """建立 SFTP 连接（优先使用私钥认证）"""
+        """建立 SFTP 连接（优先使用私钥认证，验证主机密钥）"""
         import paramiko
 
         # 展开 ~ 为用户目录（跨平台兼容）
@@ -52,6 +52,47 @@ class SFTPClient:
 
         try:
             self._transport = paramiko.Transport((self.host, self.port))
+
+            # 主机密钥验证：加载系统 known_hosts
+            host_keys = paramiko.HostKeys()
+            known_hosts_paths = [
+                os.path.expanduser("~/.ssh/known_hosts"),
+                "/etc/ssh/ssh_known_hosts",
+            ]
+            for kh_path in known_hosts_paths:
+                if os.path.isfile(kh_path):
+                    try:
+                        host_keys.load(kh_path)
+                    except OSError:
+                        pass
+
+            if host_keys:
+                # 有已知主机密钥，使用严格验证
+                remote_key = self._transport.get_remote_server_key()
+                if remote_key is None:
+                    self.disconnect()
+                    raise SFTPError(t("err.sftp.no_host_key", host=self.host))
+                host_key_entry = host_keys.lookup(self.host)
+                if host_key_entry is None:
+                    # 主机不在已知列表中，警告但允许连接（首次连接）
+                    logger.warning(
+                        "SFTP: 主机 %s 不在 known_hosts 中（首次连接）", self.host
+                    )
+                else:
+                    try:
+                        host_keys.check(self.host, remote_key)
+                    except paramiko.SSHException:
+                        self.disconnect()
+                        raise SFTPError(t("err.sftp.host_key_mismatch", host=self.host))
+            else:
+                # 没有 known_hosts 文件，跳过验证（向后兼容）
+                logger.debug("SFTP: 未找到 known_hosts 文件，跳过主机密钥验证")
+                import sys
+
+                print(
+                    t("warn.sftp.no_known_hosts", host=self.host),
+                    file=sys.stderr,
+                )
             if key_file_expanded and os.path.isfile(key_file_expanded):
                 # 私钥认证
                 pkey = self._load_private_key(key_file_expanded, self.key_passphrase)
@@ -150,6 +191,10 @@ class SFTPClient:
         finally:
             self._transport = None
 
+        # 清除敏感凭据，防止内存泄漏
+        self.password = ""
+        self.key_passphrase = ""
+
     def __enter__(self):
         self.connect()
         return self
@@ -190,7 +235,7 @@ class SFTPClient:
         except OSError as e:
             raise SFTPError(t("err.sftp.upload", path=filename, error=str(e)))
 
-    def _ensure_remote_dir(self, remote_path: str) -> None:
+    def _ensure_remote_dir(self, remote_path: str, max_depth: int = 50) -> None:
         """确保远程目录存在，不存在则逐级创建"""
         if self._sftp is None:
             return
@@ -203,7 +248,9 @@ class SFTPClient:
             # 递归创建父目录
             parent = os.path.dirname(remote_path).replace("\\", "/")
             if parent and parent != remote_path:
-                self._ensure_remote_dir(parent)
+                if max_depth <= 0:
+                    raise SFTPError(t("err.sftp.mkdir_max_depth", path=remote_path))
+                self._ensure_remote_dir(parent, max_depth - 1)
             try:
                 self._sftp.mkdir(remote_path)
             except OSError as e:

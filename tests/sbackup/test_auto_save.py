@@ -920,10 +920,12 @@ class TestEditStrategy(unittest.TestCase):
 class TestWebhook(unittest.TestCase):
     """测试 Webhook 增强功能"""
 
-    @patch("urllib.request.urlopen")
-    def test_send_webhook_single(self, mock_urlopen):
+    @patch("urllib.request.OpenerDirector.open")
+    @patch("socket.getaddrinfo")
+    def test_send_webhook_single(self, mock_getaddrinfo, mock_open):
         """测试发送单个 webhook"""
-        mock_urlopen.return_value = MagicMock()
+        mock_getaddrinfo.return_value = [(None, None, None, None, ("8.8.8.8", 0))]
+        mock_open.return_value = MagicMock()
         BackupManager._send_webhook(
             "https://example.com/hook",
             status="success",
@@ -931,12 +933,14 @@ class TestWebhook(unittest.TestCase):
             skipped=1,
             elapsed=5.0,
         )
-        mock_urlopen.assert_called_once()
+        mock_open.assert_called_once()
 
-    @patch("urllib.request.urlopen")
-    def test_send_webhook_with_template(self, mock_urlopen):
+    @patch("urllib.request.OpenerDirector.open")
+    @patch("socket.getaddrinfo")
+    def test_send_webhook_with_template(self, mock_getaddrinfo, mock_open):
         """测试自定义模板 webhook"""
-        mock_urlopen.return_value = MagicMock()
+        mock_getaddrinfo.return_value = [(None, None, None, None, ("8.8.8.8", 0))]
+        mock_open.return_value = MagicMock()
         BackupManager._send_webhook(
             "https://example.com/hook",
             status="success",
@@ -945,18 +949,20 @@ class TestWebhook(unittest.TestCase):
             elapsed=5.0,
             template='{"event":"backup","status":"{status}"}',
         )
-        req = mock_urlopen.call_args[0][0]
+        req = mock_open.call_args[0][0]
         import json
 
         payload = json.loads(req.data.decode("utf-8"))
         self.assertEqual(payload["status"], "success")
 
-    @patch("urllib.request.urlopen")
-    def test_send_webhook_retries(self, mock_urlopen):
+    @patch("urllib.request.OpenerDirector.open")
+    @patch("socket.getaddrinfo")
+    def test_send_webhook_retries(self, mock_getaddrinfo, mock_open):
         """测试 webhook 重试机制"""
         import urllib.error
 
-        mock_urlopen.side_effect = urllib.error.URLError("timeout")
+        mock_getaddrinfo.return_value = [(None, None, None, None, ("8.8.8.8", 0))]
+        mock_open.side_effect = urllib.error.URLError("timeout")
         BackupManager._send_webhook(
             "https://example.com/hook",
             status="success",
@@ -965,12 +971,14 @@ class TestWebhook(unittest.TestCase):
             elapsed=1.0,
             retries=3,
         )
-        self.assertEqual(mock_urlopen.call_count, 3)
+        self.assertEqual(mock_open.call_count, 3)
 
-    @patch("urllib.request.urlopen")
-    def test_send_webhooks_multiple(self, mock_urlopen):
+    @patch("urllib.request.OpenerDirector.open")
+    @patch("socket.getaddrinfo")
+    def test_send_webhooks_multiple(self, mock_getaddrinfo, mock_open):
         """测试多个 webhook URL"""
-        mock_urlopen.return_value = MagicMock()
+        mock_getaddrinfo.return_value = [(None, None, None, None, ("8.8.8.8", 0))]
+        mock_open.return_value = MagicMock()
         BackupManager._send_webhooks(
             ["https://hook1.example.com", "https://hook2.example.com"],
             status="success",
@@ -978,7 +986,7 @@ class TestWebhook(unittest.TestCase):
             skipped=0,
             elapsed=1.0,
         )
-        self.assertEqual(mock_urlopen.call_count, 2)
+        self.assertEqual(mock_open.call_count, 2)
 
 
 class TestDiffBackup(unittest.TestCase):

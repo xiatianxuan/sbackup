@@ -4,9 +4,13 @@ WebDAV 远程备份模块：基于 HTTP 的文件上传（支持坚果云、Next
 """
 
 import os
+import sys
+import socket
+import ipaddress
 import logging
 import urllib.request
 import urllib.error
+import urllib.parse
 from base64 import b64encode
 
 from sbackup.i18n import t
@@ -24,6 +28,39 @@ class WebDAVClient:
     """WebDAV 客户端，基于 urllib 实现，零额外依赖"""
 
     def __init__(self, url: str, user: str, password: str):
+        # SSRF 防护：验证 URL scheme 和内部 IP
+        parsed = urllib.parse.urlparse(url)
+        if parsed.scheme not in ("http", "https"):
+            raise WebDAVError(
+                t("err.webdav.invalid_scheme", scheme=parsed.scheme or "missing")
+            )
+
+        # HTTP 明文警告
+        if parsed.scheme == "http":
+            print(
+                t("warn.webdav.http_plaintext", url=url),
+                file=sys.stderr,
+            )
+
+        # 阻止内网地址
+        if parsed.hostname:
+            try:
+                host_ip = socket.getaddrinfo(
+                    parsed.hostname, None, type=socket.SOCK_STREAM
+                )[0][4][0]
+                ip = ipaddress.ip_address(host_ip)
+                if (
+                    ip.is_private
+                    or ip.is_loopback
+                    or ip.is_link_local
+                    or ip.is_multicast
+                ):
+                    raise WebDAVError(t("err.webdav.private_ip", host=parsed.hostname))
+            except WebDAVError:
+                raise
+            except (OSError, ValueError):
+                pass
+
         self.url = url.rstrip("/")
         self.user = user
         self.password = password
@@ -92,7 +129,14 @@ class WebDAVClient:
                 content_type="application/xml",
             )
             req.add_header("Depth", "0")
-            urllib.request.urlopen(req, timeout=15)
+            resp = urllib.request.urlopen(req, timeout=15)
+
+            # XML 炸弹防护：限制响应大小
+            MAX_CONNECT_XML_SIZE = 1 * 1024 * 1024  # 1MB
+            xml_data = resp.read(MAX_CONNECT_XML_SIZE + 1)
+            if len(xml_data) > MAX_CONNECT_XML_SIZE:
+                raise WebDAVError(t("err.webdav.xml_too_large", size=len(xml_data)))
+
             logger.debug("WebDAV 连接成功: %s", self.url)
         except urllib.error.HTTPError as e:
             if e.code == 401:
@@ -166,6 +210,11 @@ class WebDAVClient:
             raise WebDAVError(t("err.webdav.list", path=remote_path, error=str(e)))
         except OSError as e:
             raise WebDAVError(t("err.webdav.list", path=remote_path, error=str(e)))
+
+        # XML 炸弹防护：限制响应大小
+        MAX_XML_SIZE = 10 * 1024 * 1024  # 10MB
+        if len(xml_data) > MAX_XML_SIZE:
+            raise WebDAVError(t("err.webdav.xml_too_large", size=len(xml_data)))
 
         files = []
         try:

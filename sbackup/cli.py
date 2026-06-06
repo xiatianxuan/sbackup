@@ -70,8 +70,10 @@ def get_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--incremental",
-        action="store_true",
-        default=False,
+        nargs="?",
+        const="file",
+        default=None,
+        choices=["file", "block"],
         help=t("cli.help.incremental"),
     )
     parser.add_argument(
@@ -262,6 +264,18 @@ def get_parser() -> argparse.ArgumentParser:
         default=None,
         help=t("cli.help.watch.post_hook"),
     )
+    watch_parser.add_argument(
+        "--realtime",
+        action="store_true",
+        default=False,
+        help=t("cli.help.watch.realtime"),
+    )
+    watch_parser.add_argument(
+        "--debounce",
+        type=float,
+        default=30,
+        help=t("cli.help.watch.debounce"),
+    )
 
     restore_parser = subparsers.add_parser("restore", help=t("cli.help.restore"))
     restore_parser.add_argument("backup_file", help=t("cli.help.restore.file"))
@@ -290,12 +304,32 @@ def get_parser() -> argparse.ArgumentParser:
     diff_parser.add_argument("--password", default="", help=t("cli.help.diff.password"))
 
     verify_parser = subparsers.add_parser("verify", help=t("cli.help.verify"))
-    verify_parser.add_argument("backup_file", help=t("cli.help.verify.file"))
+    verify_parser.add_argument(
+        "backup_file", nargs="?", default=None, help=t("cli.help.verify.file")
+    )
     verify_parser.add_argument(
         "--fast",
         action="store_true",
         default=False,
         help=t("cli.help.verify.fast"),
+    )
+    verify_parser.add_argument(
+        "--all",
+        action="store_true",
+        default=False,
+        help=t("cli.help.verify.all"),
+    )
+    verify_parser.add_argument(
+        "--detail",
+        action="store_true",
+        default=False,
+        help=t("cli.help.verify.detail"),
+    )
+    verify_parser.add_argument(
+        "--split",
+        action="store_true",
+        default=False,
+        help=t("cli.help.verify.split"),
     )
     verify_parser.add_argument(
         "--password", default="", help=t("cli.help.verify.password")
@@ -484,6 +518,17 @@ def get_parser() -> argparse.ArgumentParser:
     clean_parser.add_argument(
         "--keep-days", type=int, default=0, help=t("cli.help.clean.keep_days")
     )
+    completion_parser = subparsers.add_parser(
+        "completion", help=t("cli.help.completion")
+    )
+    completion_parser.add_argument(
+        "shell",
+        nargs="?",
+        default="bash",
+        choices=["bash", "zsh", "fish", "powershell"],
+        help=t("cli.help.completion.shell"),
+    )
+
     clean_parser.add_argument(
         "--dry-run",
         action="store_true",
@@ -618,63 +663,126 @@ def _handle_list(args, config, manager) -> int:
 
 
 def _handle_save(args, config, manager) -> int:
-    manager.execute_backups(
-        keep=args.keep,
-        keep_days=args.keep_days,
-        password=args.password,
-        sftp_upload=args.sftp,
-        webdav_upload=args.webdav,
-        dry_run=args.dry_run,
-        verify=args.verify,
-        name_template=args.name_template,
-        webhook_url=args.webhook,
-        follow_symlinks=args.follow_symlinks,
-        max_size=_parse_size(args.max_size) if args.max_size else 0,
-        min_size=_parse_size(args.min_size) if args.min_size else 0,
-        max_age_seconds=_parse_duration(args.older_than) if args.older_than else 0,
-        incremental=args.incremental,
-        split_size=_parse_size(args.split) if args.split else 0,
-        tag=args.tag or "",
-        checksum=args.checksum,
-        pre_hooks=getattr(args, "pre_hook", None) or [],
-        post_hooks=getattr(args, "post_hook", None) or [],
-    )
+    from sbackup.lock import BackupLock
+
+    if args.password:
+        print(t("warn.password_in_cli"), file=sys.stderr)
+    lock = BackupLock(os.path.dirname(config.data_file) or ".")
+    if not lock.acquire():
+        print(t("err.lock.conflict"))
+        return 1
+    try:
+        manager.execute_backups(
+            keep=args.keep,
+            keep_days=args.keep_days,
+            password=args.password,
+            sftp_upload=args.sftp,
+            webdav_upload=args.webdav,
+            dry_run=args.dry_run,
+            verify=args.verify,
+            name_template=args.name_template,
+            webhook_url=args.webhook,
+            follow_symlinks=args.follow_symlinks,
+            max_size=_parse_size(args.max_size) if args.max_size else 0,
+            min_size=_parse_size(args.min_size) if args.min_size else 0,
+            max_age_seconds=_parse_duration(args.older_than) if args.older_than else 0,
+            incremental=args.incremental,
+            split_size=_parse_size(args.split) if args.split else 0,
+            tag=args.tag or "",
+            checksum=args.checksum,
+            pre_hooks=getattr(args, "pre_hook", None) or [],
+            post_hooks=getattr(args, "post_hook", None) or [],
+        )
+    finally:
+        lock.release()
     return 0
 
 
 def _handle_watch(args, config, manager) -> int:
+    from sbackup.lock import BackupLock
+
     import time as _time
 
     interval_sec = max(args.interval, 1) * 60
-    print(t("cmd.watch.start", interval=args.interval))
+    realtime = getattr(args, "realtime", False)
+    debounce = max(getattr(args, "debounce", 30), 1)
+
+    # watch 命令长期持有锁，阻止并发 save/watch
+    lock = BackupLock(os.path.dirname(config.data_file) or ".")
+    if not lock.acquire():
+        print(t("err.lock.conflict"))
+        return 1
+
+    if args.password:
+        print(t("warn.password_in_cli"), file=sys.stderr)
+
+    def do_backup() -> None:
+        manager.execute_backups(
+            keep=args.keep,
+            keep_days=args.keep_days,
+            password=args.password,
+            sftp_upload=args.sftp,
+            webdav_upload=args.webdav,
+            dry_run=args.dry_run,
+            verify=args.verify,
+            name_template=args.name_template,
+            webhook_url=args.webhook,
+            follow_symlinks=args.follow_symlinks,
+            max_size=_parse_size(args.max_size) if args.max_size else 0,
+            min_size=_parse_size(args.min_size) if args.min_size else 0,
+            max_age_seconds=_parse_duration(args.older_than) if args.older_than else 0,
+            incremental=args.incremental,
+            split_size=_parse_size(args.split) if args.split else 0,
+            tag=args.tag or "",
+            checksum=args.checksum,
+            pre_hooks=getattr(args, "pre_hook", None) or [],
+            post_hooks=getattr(args, "post_hook", None) or [],
+        )
+
     try:
+        if realtime:
+            from sbackup.monitor import FileSystemMonitor
+            from sbackup.auto_save import BackupEntry
+
+            source_dirs: dict[str, str] = {}
+            for key, raw in manager.data.items():
+                if key in ("_history", "_file_meta"):
+                    continue
+                entry = BackupEntry.from_list(raw)
+                source_dirs[key] = entry.target
+
+            if not source_dirs:
+                print(t("cmd.all.empty"))
+                return 1
+
+            monitor = FileSystemMonitor(source_dirs, debounce_seconds=debounce)
+            monitor.set_backup_callback(do_backup)
+
+            print(t("cmd.watch.start_realtime", debounce=debounce))
+            monitor.start()
+
+            if not monitor.is_running():
+                return 1
+
+            try:
+                do_backup()
+                while True:
+                    _time.sleep(interval_sec)
+                    do_backup()
+            except KeyboardInterrupt:
+                pass
+            finally:
+                monitor.stop()
+            return 0
+
+        print(t("cmd.watch.start", interval=args.interval))
         while True:
-            manager.execute_backups(
-                keep=args.keep,
-                keep_days=args.keep_days,
-                password=args.password,
-                sftp_upload=args.sftp,
-                webdav_upload=args.webdav,
-                dry_run=args.dry_run,
-                verify=args.verify,
-                name_template=args.name_template,
-                webhook_url=args.webhook,
-                follow_symlinks=args.follow_symlinks,
-                max_size=_parse_size(args.max_size) if args.max_size else 0,
-                min_size=_parse_size(args.min_size) if args.min_size else 0,
-                max_age_seconds=_parse_duration(args.older_than)
-                if args.older_than
-                else 0,
-                incremental=args.incremental,
-                split_size=_parse_size(args.split) if args.split else 0,
-                tag=args.tag or "",
-                checksum=args.checksum,
-                pre_hooks=getattr(args, "pre_hook", None) or [],
-                post_hooks=getattr(args, "post_hook", None) or [],
-            )
+            do_backup()
             _time.sleep(interval_sec)
     except KeyboardInterrupt:
         return 0
+    finally:
+        lock.release()
 
 
 def _handle_restore(args, config, manager) -> int:
@@ -713,12 +821,107 @@ def _handle_diff(args, config, manager) -> int:
 
 
 def _handle_verify(args, config, manager) -> int:
+    from sbackup.compression import (
+        verify_backup,
+        verify_backup_fast,
+        get_backup_info,
+        verify_split_integrity,
+    )
+
+    # 分卷完整性验证
+    if args.split:
+        if not args.backup_file:
+            print(t("cmd.verify.no_file"))
+            return 1
+        result = verify_split_integrity(args.backup_file)
+        if result["success"]:
+            print(
+                t(
+                    "cmd.verify.split_success",
+                    file=result.get("original_file", ""),
+                    parts=result.get("parts_count", 0),
+                )
+            )
+            return 0
+        else:
+            error = result.get("error", "")
+            if error:
+                print(t("cmd.verify.split_error", error=error))
+            else:
+                print(
+                    t("cmd.verify.split_failed", file=result.get("original_file", ""))
+                )
+                for r in result.get("results", []):
+                    if r["status"] != "ok":
+                        print(f"  {r['path']}: {r['status']}")
+            return 1
+
+    # 批量验证所有备份
+    if args.all:
+        history = manager.get_history()
+        if not history:
+            print(t("cmd.verify.no_history"))
+            return 1
+
+        success_count = 0
+        fail_count = 0
+        for entry in reversed(history):
+            source = entry.get("source", "")
+            sha256 = entry.get("sha256", "")
+            if not source or not os.path.isfile(source):
+                continue
+
+            if args.detail:
+                info = get_backup_info(source, args.password)
+                print(t("cmd.verify.detail_header", path=source))
+                print(
+                    t(
+                        "cmd.verify.detail_info",
+                        size=info.get("size_mb", 0),
+                        files=info.get("files_count", 0),
+                        fmt=info.get("format", "unknown"),
+                        sha256=sha256[:16] if sha256 else "N/A",
+                    )
+                )
+
+            if sha256:
+                result = verify_backup_fast(source, sha256)
+            else:
+                result = verify_backup(source, args.password)
+
+            if result["success"]:
+                print(t("cmd.verify.batch_success", path=source))
+                success_count += 1
+            else:
+                print(t("cmd.verify.batch_failed", path=source))
+                fail_count += 1
+
+        print(t("cmd.verify.batch_summary", success=success_count, fail=fail_count))
+        return 0 if fail_count == 0 else 1
+
+    # 单文件验证
+    if not args.backup_file:
+        print(t("cmd.verify.no_file"))
+        return 1
+
+    if args.detail:
+        info = get_backup_info(args.backup_file, args.password)
+        sha256 = manager.find_checksum(args.backup_file)
+        print(t("cmd.verify.detail_header", path=args.backup_file))
+        print(
+            t(
+                "cmd.verify.detail_info",
+                size=info.get("size_mb", 0),
+                files=info.get("files_count", 0),
+                fmt=info.get("format", "unknown"),
+                sha256=sha256[:16] if sha256 else "N/A",
+            )
+        )
+
     if args.fast:
         # 快速验证：用历史 SHA256 比对，无需解压
         sha256 = manager.find_checksum(args.backup_file)
         if sha256:
-            from sbackup.compression import verify_backup_fast
-
             result = verify_backup_fast(args.backup_file, sha256)
             if result["success"]:
                 print(
@@ -731,13 +934,9 @@ def _handle_verify(args, config, manager) -> int:
         else:
             print(t("cmd.verify.no_checksum", path=args.backup_file))
             # 回退到完整验证
-            from sbackup.compression import verify_backup
-
             result = verify_backup(args.backup_file, args.password)
             return 0 if result["success"] else 1
     else:
-        from sbackup.compression import verify_backup
-
         result = verify_backup(args.backup_file, args.password)
         return 0 if result["success"] else 1
 
@@ -963,6 +1162,19 @@ def _handle_clean(args, config, manager) -> int:
     return 0
 
 
+def _handle_completion(args, config, manager) -> int:
+    """生成并输出 shell 自动补全脚本"""
+    from sbackup.completion import generate
+
+    try:
+        script = generate(args.shell)
+        print(script, end="")
+    except ValueError as e:
+        print(e, file=sys.stderr)
+        return 1
+    return 0
+
+
 _COMMAND_HANDLERS: dict[str, callable] = {
     "version": _handle_version,
     "add": _handle_add,
@@ -992,6 +1204,7 @@ _COMMAND_HANDLERS: dict[str, callable] = {
     "report": _handle_report,
     "search": _handle_search,
     "clean": _handle_clean,
+    "completion": _handle_completion,
 }
 
 

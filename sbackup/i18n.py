@@ -34,6 +34,41 @@ def set_locale(lang: str) -> None:
     设置当前语言环境并加载对应的翻译文件
     """
     global _current_locale, _translations
+
+    # 安全检查：拒绝包含路径遍历字符的语言代码
+    if not lang or "/" in lang or "\\" in lang or ".." in lang or ":" in lang:
+        logger.warning("i18n.set_locale.invalid_lang: %s", lang)
+        return
+
+    # 白名单校验：只允许已知的语言代码格式
+    _KNOWN_LOCALES = {
+        "zh_CN",
+        "en_US",
+        "fr_FR",
+        "es_ES",
+        "ru_RU",
+        "de_DE",
+        "ja_JP",
+        "pt_BR",
+        "ko_KR",
+    }
+    if lang not in _KNOWN_LOCALES:
+        logger.warning("i18n.set_locale.unknown_locale: %s", lang)
+        # 仍然设置 _current_locale 以保持向后兼容
+        _current_locale = lang
+        # 回退到默认中文翻译
+        default_file = os.path.join(_get_locales_dir(), "zh_CN.json")
+        if os.path.exists(default_file):
+            try:
+                with open(default_file, "r", encoding="utf-8") as f:
+                    _translations = json.load(f)
+            except (json.JSONDecodeError, OSError) as e:
+                logger.warning(
+                    t("log.i18n.load.fallback_failed", path=default_file, error=e)
+                )
+                _translations = {}
+        return
+
     _current_locale = lang
     locale_file = os.path.join(_get_locales_dir(), f"{lang}.json")
     if os.path.exists(locale_file):

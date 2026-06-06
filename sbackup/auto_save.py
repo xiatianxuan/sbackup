@@ -100,7 +100,7 @@ class BackupManager:
 
     def save(self, initial: bool = False):
         """
-        将内存数据写入 JSON 文件
+        将内存数据写入 JSON 文件（原子写入，防止中断导致数据损坏）
         """
         if not initial:
             logger.debug(t("log.data.write"), self.data_file)
@@ -109,8 +109,23 @@ class BackupManager:
         if data_dir:
             os.makedirs(data_dir, exist_ok=True)
 
-        with open(self.data_file, "w", encoding="utf-8") as f:
-            json.dump(self.data, f, ensure_ascii=False, indent=4)
+        # 原子写入：先写入临时文件，再 rename 替换
+        tmp_path = self.data_file + ".tmp"
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(self.data, f, ensure_ascii=False, indent=4)
+                f.flush()
+                os.fsync(f.fileno())
+            # os.replace() 在 Windows 和 Unix 上都是原子操作
+            os.replace(tmp_path, self.data_file)
+        except OSError:
+            # 如果临时文件写入失败，尝试清理
+            if os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
+            raise
 
     def _get_entry(self, key: str) -> BackupEntry | None:
         """获取指定路径的备份策略条目"""
@@ -398,7 +413,7 @@ class BackupManager:
         max_size: int = 0,
         min_size: int = 0,
         max_age_seconds: float = 0,
-        incremental: bool = False,
+        incremental: str | None = None,
         split_size: int = 0,
         tag: str = "",
         checksum: bool = False,
@@ -420,7 +435,7 @@ class BackupManager:
         :param max_size: 文件大小上限（字节），0 不限制
         :param min_size: 文件大小下限（字节），0 不限制
         :param max_age_seconds: 文件年龄上限（秒），0 不限制
-        :param incremental: 文件级增量备份（仅压缩变化的文件）
+        :param incremental: 增量备份模式: None/""=全量, "file"=文件级, "block"=块级
         :param pre_hooks: 备份前执行的命令列表
         :param post_hooks: 备份后执行的命令列表
         """
@@ -430,14 +445,15 @@ class BackupManager:
         # 执行前置钩子
         self._run_hooks(pre_hooks or [], "pre")
 
-        # 加载文件级元数据（增量备份用）
+        # 加载文件级/块级元数据（增量备份用）
         file_meta_all = self.data.get("_file_meta", {}) if incremental else {}
+        chunk_meta_all = self.data.get("_chunk_meta", {}) if incremental == "block" else {}
 
         # 收集需要备份的条目
         tasks = []
         skip_count = 0
         for key, raw in list(self.data.items()):
-            if key in (_HISTORY_KEY, "_file_meta"):
+            if key in (_HISTORY_KEY, "_file_meta", "_chunk_meta"):
                 continue
             if not os.path.exists(key):
                 print(t("warn.source.missing", path=key))
@@ -449,6 +465,7 @@ class BackupManager:
                 continue
             entry = BackupEntry.from_list(raw)
             file_meta = file_meta_all.get(key, {}) if incremental else {}
+            chunk_meta = chunk_meta_all.get(key, {}) if incremental == "block" else {}
             if entry.mtime != current_mtime:
                 tasks.append(
                     (
@@ -464,6 +481,8 @@ class BackupManager:
                         max_age_seconds,
                         file_meta,
                         split_size,
+                        incremental,
+                        chunk_meta,
                     )
                 )
             else:
@@ -486,7 +505,7 @@ class BackupManager:
                     executor.submit(self._do_backup, *task): task for task in tasks
                 }
                 for future in as_completed(futures):
-                    key, entry, current_mtime, _, _, _, _, _, _, _, _, _ = futures[
+                    key, entry, current_mtime, _, _, _, _, _, _, _, _, _, incr_mode, _ = futures[
                         future
                     ]
                     try:
@@ -505,10 +524,12 @@ class BackupManager:
                             result.get("path", ""),
                             tag=tag,
                         )
-                        if incremental:
+                        if incr_mode:
                             self.data.setdefault("_file_meta", {})[key] = (
                                 self._collect_file_meta(key, checksum=checksum)
                             )
+                        if incr_mode == "block":
+                            self._update_chunk_meta(key)
                         if keep > 0 or keep_days > 0:
                             self._cleanup_old_backups(entry.target, keep, keep_days)
                         backup_count += 1
@@ -532,6 +553,8 @@ class BackupManager:
                 age,
                 fmeta,
                 split,
+                incr_mode,
+                chmeta,
             ) in tasks:
                 result = self._do_backup(
                     key,
@@ -546,6 +569,8 @@ class BackupManager:
                     age,
                     fmeta,
                     split,
+                    incr_mode,
+                    chmeta,
                 )
                 if result and result.get("success"):
                     entry.mtime = current_mtime
@@ -558,10 +583,12 @@ class BackupManager:
                         result.get("path", ""),
                         tag=tag,
                     )
-                    if incremental:
+                    if incr_mode:
                         self.data.setdefault("_file_meta", {})[key] = (
                             self._collect_file_meta(key, checksum=checksum)
                         )
+                    if incr_mode == "block":
+                        self._update_chunk_meta(key)
                     if keep > 0 or keep_days > 0:
                         self._cleanup_old_backups(entry.target, keep, keep_days)
                     backup_count += 1
@@ -596,13 +623,28 @@ class BackupManager:
         if verify_failures > 0:
             print(t("cmd.verify.partial_fail", count=verify_failures))
 
-        # SFTP 上传
-        if sftp_upload and uploaded_files:
-            self._upload_to_sftp(uploaded_files, config)
+        # 并行上传到 SFTP 和 WebDAV（使用 ThreadPoolExecutor）
+        sftp_needed = sftp_upload and bool(uploaded_files)
+        webdav_needed = webdav_upload and bool(uploaded_files)
 
-        # WebDAV 上传
-        if webdav_upload and uploaded_files:
-            self._upload_to_webdav(uploaded_files, config)
+        if sftp_needed and webdav_needed:
+            print(t("cmd.upload.parallel"))
+            with ThreadPoolExecutor(max_workers=2) as upload_executor:
+                sftp_future = upload_executor.submit(
+                    self._upload_to_sftp, uploaded_files, config
+                )
+                webdav_future = upload_executor.submit(
+                    self._upload_to_webdav, uploaded_files, config
+                )
+                for f in as_completed([sftp_future, webdav_future]):
+                    exc = f.exception()
+                    if exc:
+                        logger.error("Parallel upload error: %s", exc)
+        else:
+            if sftp_needed:
+                self._upload_to_sftp(uploaded_files, config)
+            if webdav_needed:
+                self._upload_to_webdav(uploaded_files, config)
 
         # Webhook 通知（支持多个 URL、自定义模板、重试）
         all_webhook_urls = list(getattr(config, "webhook_urls", []))
@@ -634,6 +676,20 @@ class BackupManager:
                 retries=getattr(config, "webhook_retries", 2),
             )
 
+        # SMTP 邮件通知
+        if getattr(config, "smtp_enabled", False):
+            status = "成功" if verify_failures == 0 else "部分成功"
+            if backup_count == 0:
+                status = "跳过"
+            self._send_email(
+                config,
+                status=status,
+                backed=backup_count,
+                skipped=skip_count,
+                elapsed=elapsed,
+                verify_failures=verify_failures,
+            )
+
         # 执行后置钩子
         self._run_hooks(post_hooks or [], "post")
 
@@ -644,6 +700,7 @@ class BackupManager:
         :param hook_type: "pre" 或 "post"，用于日志标识
         """
         import subprocess
+        import shlex
 
         for cmd in hooks:
             if not cmd:
@@ -652,7 +709,11 @@ class BackupManager:
             print(t(label, command=cmd))
             try:
                 result = subprocess.run(
-                    cmd, shell=True, timeout=300, capture_output=True, text=True
+                    shlex.split(cmd),
+                    shell=False,
+                    timeout=300,
+                    capture_output=True,
+                    text=True,
                 )
                 if result.returncode != 0:
                     logger.warning(
@@ -679,6 +740,8 @@ class BackupManager:
         max_age_seconds: float = 0,
         file_metadata: dict | None = None,
         split_size: int = 0,
+        incremental: str | None = None,
+        chunk_meta: dict | None = None,
     ) -> dict:
         """执行单个备份策略（线程安全）"""
         fmt = entry.compression_format or config.compression_format
@@ -764,6 +827,27 @@ class BackupManager:
         except OSError:
             pass
         return meta
+
+    def _update_chunk_meta(self, key: str) -> None:
+        """为指定策略更新块级哈希元数据"""
+        from sbackup.chunked_backup import compute_chunk_hashes
+
+        if not os.path.isdir(key):
+            return
+        try:
+            for dirpath, _, filenames in os.walk(key):
+                for fn in filenames:
+                    fp = os.path.join(dirpath, fn)
+                    try:
+                        if os.path.isfile(fp):
+                            rel = os.path.relpath(fp, key).replace("\\", "/")
+                            self.data.setdefault("_chunk_meta", {}).setdefault(
+                                key, {}
+                            )[rel] = compute_chunk_hashes(fp)
+                    except OSError:
+                        pass
+        except OSError:
+            pass
 
     @staticmethod
     def _check_disk_space(target_dir: str, min_ratio: float = 0.05) -> None:
@@ -891,7 +975,46 @@ class BackupManager:
                 ensure_ascii=False,
             ).encode("utf-8")
 
-        max_attempts = max(retries, 1)
+        max_attempts = min(max(retries, 1), 5)
+
+        # SSRF 防护：只允许 http/https 协议，阻止内网地址
+        from urllib.parse import urlparse
+
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https"):
+            logger.warning("Webhook URL 协议不允许: %s (仅支持 http/https)", url)
+            return
+
+        # 解析主机名并阻止内部/保留 IP
+        if parsed.hostname:
+            try:
+                import ipaddress
+                import socket as _socket
+
+                host_ip = _socket.getaddrinfo(
+                    parsed.hostname, None, type=_socket.SOCK_STREAM
+                )[0][4][0]
+                ip = ipaddress.ip_address(host_ip)
+                if (
+                    ip.is_private
+                    or ip.is_loopback
+                    or ip.is_link_local
+                    or ip.is_multicast
+                ):
+                    logger.warning(
+                        "Webhook URL 指向内部地址，已阻止: %s", parsed.hostname
+                    )
+                    return
+            except (OSError, ValueError):
+                pass
+
+        # 禁用自动重定向（防止重定向链绕过协议/地址检查）
+        class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, req, fp, code, msg, headers, newurl):
+                return None
+
+        no_redirect_opener = urllib.request.build_opener(_NoRedirectHandler)
+
         for attempt in range(max_attempts):
             try:
                 req = urllib.request.Request(
@@ -900,8 +1023,8 @@ class BackupManager:
                     method="POST",
                     headers={"Content-Type": "application/json"},
                 )
-                urllib.request.urlopen(req, timeout=10)
-                logger.debug("Webhook 通知成功: %s", url)
+                no_redirect_opener.open(req, timeout=10)
+                logger.debug("Webhook 通知成功: %s", parsed.hostname)
                 return
             except (urllib.error.URLError, OSError) as e:
                 if attempt < max_attempts - 1:
@@ -911,11 +1034,11 @@ class BackupManager:
                         attempt + 1,
                         max_attempts,
                         wait,
-                        url,
+                        parsed.hostname,
                     )
                     _time.sleep(wait)
                 else:
-                    logger.warning("Webhook 通知失败: %s — %s", url, e)
+                    logger.warning("Webhook 通知失败: %s — %s", parsed.hostname, e)
 
     @staticmethod
     def _send_webhooks(
@@ -945,6 +1068,68 @@ class BackupManager:
 
     # 向后兼容别名
     save_folder = execute_backups
+
+    @staticmethod
+    def _safe_smtp_header(value: str) -> str:
+        """净化 SMTP 头值，防止头注入"""
+        return value.replace("\r", "").replace("\n", "")
+
+    @staticmethod
+    def _send_email(
+        config: Config,
+        *,
+        status: str,
+        backed: int,
+        skipped: int,
+        elapsed: float,
+        verify_failures: int = 0,
+    ) -> None:
+        """通过 SMTP 发送备份结果邮件通知"""
+        import smtplib
+        from email.mime.text import MIMEText
+        from email.mime.multipart import MIMEMultipart
+        from datetime import datetime
+
+        if not config.smtp_enabled or not config.smtp_host:
+            return
+
+        subject = (
+            f"[sbackup] 备份{status} - {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+        )
+
+        body = f"""sbackup 备份通知
+
+状态: {status}
+备份策略数: {backed}
+跳过数: {skipped}
+耗时: {elapsed:.2f} 秒
+验证失败: {verify_failures}
+时间: {datetime.now().isoformat(timespec="seconds")}
+"""
+
+        msg = MIMEMultipart()
+        msg["From"] = BackupManager._safe_smtp_header(
+            config.smtp_from or config.smtp_user
+        )
+        msg["To"] = BackupManager._safe_smtp_header(config.smtp_to)
+        msg["Subject"] = BackupManager._safe_smtp_header(subject)
+        msg.attach(MIMEText(body, "plain", "utf-8"))
+
+        try:
+            if config.smtp_tls:
+                server = smtplib.SMTP(config.smtp_host, config.smtp_port)
+                server.starttls()
+            else:
+                server = smtplib.SMTP(config.smtp_host, config.smtp_port)
+
+            if config.smtp_user and config.smtp_password:
+                server.login(config.smtp_user, config.smtp_password)
+
+            server.send_message(msg)
+            server.quit()
+            logger.debug("邮件通知成功: %s", config.smtp_to)
+        except (smtplib.SMTPException, OSError) as e:
+            logger.warning("邮件通知失败: %s", e)
 
     @staticmethod
     def _upload_to_sftp(file_paths: list[str], config: Config) -> None:
@@ -1318,7 +1503,7 @@ class BackupManager:
         # 收集所有策略的目标目录
         target_dirs: set[str] = set()
         for key, raw in self.data.items():
-            if key in (_HISTORY_KEY, "_file_meta"):
+            if key in (_HISTORY_KEY, "_file_meta", "_chunk_meta"):
                 continue
             entry = BackupEntry.from_list(raw)
             if entry.target:
@@ -1369,7 +1554,7 @@ class BackupManager:
         """导出所有备份策略到 JSON 文件，返回导出的策略数"""
         export_data = {}
         for key, raw in self.data.items():
-            if key in (_HISTORY_KEY, "_file_meta"):
+            if key in (_HISTORY_KEY, "_file_meta", "_chunk_meta"):
                 continue
             export_data[key] = raw
         data_dir = os.path.dirname(output_file)
@@ -1383,6 +1568,13 @@ class BackupManager:
         """从 JSON 文件导入备份策略，返回 (导入数, 跳过数) 或 None"""
         if not os.path.exists(input_file):
             return None
+        # 文件大小限制：最多 10 MB
+        try:
+            if os.path.getsize(input_file) > 10 * 1024 * 1024:
+                logger.warning("Import file too large: %s", input_file)
+                return None
+        except OSError:
+            return None
         try:
             with open(input_file, "r", encoding="utf-8") as f:
                 import_data = json.load(f)
@@ -1392,9 +1584,50 @@ class BackupManager:
             return None
         imported = 0
         skipped = 0
+        _RESERVED_KEYS = {_HISTORY_KEY, "_file_meta", "_chunk_meta"}
+        _VALID_FORMATS = {
+            "",
+            "ZIP",
+            "TAR",
+            "TAR_GZ",
+            "TAR_BZ2",
+            "TAR_XZ",
+            "TAR_ZST",
+            "7Z",
+            "zip",
+            "tar",
+            "tar.gz",
+            "tar.bz2",
+            "tar.xz",
+            "tar.zst",
+            "7z",
+        }
         for key, raw in import_data.items():
+            # 安全检查：拒绝内部保留键
+            if key in _RESERVED_KEYS:
+                skipped += 1
+                continue
             if not isinstance(raw, list) or len(raw) < 3:
                 continue
+            # 安全检查：验证数据结构
+            if not isinstance(raw[0], (int, float)):
+                continue
+            if not isinstance(raw[1], str):
+                continue
+            if not isinstance(raw[2], list):
+                continue
+            # 拒绝包含路径遍历的源/目标路径
+            if ".." in key or not key.strip():
+                skipped += 1
+                continue
+            if ".." in raw[1] or not raw[1].strip():
+                skipped += 1
+                continue
+            # 验证条目级格式（如有）
+            if len(raw) > 3 and raw[3]:
+                if not isinstance(raw[3], str) or raw[3] not in _VALID_FORMATS:
+                    skipped += 1
+                    continue
             if key in self.data:
                 skipped += 1
                 continue
@@ -1410,7 +1643,7 @@ class BackupManager:
 
         # 统计策略数
         strategies = {
-            k: v for k, v in self.data.items() if k not in (_HISTORY_KEY, "_file_meta")
+            k: v for k, v in self.data.items() if k not in (_HISTORY_KEY, "_file_meta", "_chunk_meta")
         }
         lines.append(t("cmd.status.strategies", count=len(strategies)))
 
@@ -1481,7 +1714,7 @@ class BackupManager:
         return {
             key: BackupEntry.from_list(raw).target
             for key, raw in self.data.items()
-            if key not in (_HISTORY_KEY, "_file_meta")
+            if key not in (_HISTORY_KEY, "_file_meta", "_chunk_meta")
         }
 
     @staticmethod
@@ -1519,7 +1752,7 @@ class BackupManager:
         生成对齐的文本表格
         """
         non_history_keys = [
-            k for k in self.data if k not in (_HISTORY_KEY, "_file_meta")
+            k for k in self.data if k not in (_HISTORY_KEY, "_file_meta", "_chunk_meta")
         ]
         if not non_history_keys:
             return t("cmd.all.empty")
@@ -1532,7 +1765,7 @@ class BackupManager:
         ]
         rows = []
         for path, raw in self.data.items():
-            if path in (_HISTORY_KEY, "_file_meta"):
+            if path in (_HISTORY_KEY, "_file_meta", "_chunk_meta"):
                 continue
             entry = BackupEntry.from_list(raw)
             fmt_display = (
@@ -1562,7 +1795,7 @@ class BackupManager:
 
         # 策略统计
         strategies = {
-            k: v for k, v in self.data.items() if k not in (_HISTORY_KEY, "_file_meta")
+            k: v for k, v in self.data.items() if k not in (_HISTORY_KEY, "_file_meta", "_chunk_meta")
         }
         lines.append("## 策略概览")
         lines.append(f"- 策略总数: {len(strategies)}")

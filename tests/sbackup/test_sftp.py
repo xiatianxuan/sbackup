@@ -403,8 +403,12 @@ class TestSFTPClient(unittest.TestCase):
         )
         client.connect()
 
-        # 验证 expanduser 被调用
-        mock_expanduser.assert_called_once_with(self.key_file)
+        # 验证 expanduser 被调用（包括 key_file 和 known_hosts 路径）
+        expanduser_calls = [str(c) for c in mock_expanduser.call_args_list]
+        self.assertTrue(
+            any(self.key_file in c for c in expanduser_calls),
+            f"expanduser should be called with key_file, got: {expanduser_calls}",
+        )
         mock_transport.connect.assert_called_once_with(
             username=self.user, pkey=mock_pkey
         )

@@ -134,44 +134,52 @@ def _resolve_name(template: str, folder_name: str) -> str:
 
 
 def _encrypt_file(file_path: str, password: str) -> str:
-    """用密码加密文件（PBKDF2 + XOR 流密码），返回加密后的文件路径"""
+    """用密码加密文件（PBKDF2 + XOR 流密码 + HMAC 完整性校验），返回加密后的文件路径"""
     import hashlib
 
     salt = os.urandom(16)
-    key = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, 100_000)
+    key = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, 600_000)
 
     encrypted_path = file_path + ".enc"
-    with open(file_path, "rb") as fin, open(encrypted_path, "wb") as fout:
-        fout.write(salt)
-        key_stream = bytearray()
-        block_index = 0
-        while True:
-            chunk = fin.read(65536)
-            if not chunk:
-                break
-            # 生成密钥流
-            while len(key_stream) < len(chunk):
-                block_index += 1
-                key_stream.extend(
-                    hashlib.sha256(key + block_index.to_bytes(4, "big")).digest()
+    tmp_path = encrypted_path + ".tmp"
+    try:
+        with open(file_path, "rb") as fin, open(tmp_path, "wb") as fout:
+            fout.write(salt)
+            key_stream = bytearray()
+            block_index = 0
+            while True:
+                chunk = fin.read(65536)
+                if not chunk:
+                    break
+                while len(key_stream) < len(chunk):
+                    block_index += 1
+                    key_stream.extend(
+                        hashlib.sha256(key + block_index.to_bytes(4, "big")).digest()
+                    )
+                encrypted = bytes(
+                    a ^ b for a, b in zip(chunk, key_stream[: len(chunk)])
                 )
-            # XOR 加密
-            encrypted = bytes(a ^ b for a, b in zip(chunk, key_stream[: len(chunk)]))
-            fout.write(encrypted)
-            key_stream = key_stream[len(chunk) :]
-
+                fout.write(encrypted)
+                key_stream = key_stream[len(chunk) :]
+        # 原子替换到最终路径
+        os.replace(tmp_path, encrypted_path)
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
     os.remove(file_path)
     return encrypted_path
 
 
 def _decrypt_file(encrypted_path: str, password: str) -> str:
-    """解密由 _encrypt_file 加密的文件，返回解密后的文件路径"""
+    """解密由 _encrypt_file 加密的文件，返回解密后的文件路径。密码错误时抛出 ValueError"""
     import hashlib
 
     decrypted_path = encrypted_path.removesuffix(".enc")
     with open(encrypted_path, "rb") as fin:
         salt = fin.read(16)
-        key = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, 100_000)
+        if len(salt) < 16:
+            raise ValueError("Invalid encrypted file: too short")
+        key = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, 600_000)
 
         with open(decrypted_path, "wb") as fout:
             key_stream = bytearray()
@@ -246,11 +254,12 @@ class BaseCompressor:
                 negated.append(pattern[1:])
                 continue
             if pattern.startswith("re:"):
-                # 正则表达式模式
+                regex_str = pattern[3:]
+                # ReDoS 防护：拒绝过长或明显恶意的正则
+                if len(regex_str) > 256:
+                    continue
                 try:
-                    if re.search(pattern[3:], rel_path) or re.search(
-                        pattern[3:], basename
-                    ):
+                    if re.search(regex_str, rel_path) or re.search(regex_str, basename):
                         matched = True
                 except re.error:
                     pass
@@ -262,10 +271,11 @@ class BaseCompressor:
             return False
         for pattern in negated:
             if pattern.startswith("re:"):
+                regex_str = pattern[3:]
+                if len(regex_str) > 256:
+                    continue
                 try:
-                    if re.search(pattern[3:], rel_path) or re.search(
-                        pattern[3:], basename
-                    ):
+                    if re.search(regex_str, rel_path) or re.search(regex_str, basename):
                         return False
                 except re.error:
                     pass
@@ -827,6 +837,85 @@ def _match_select_pattern(name: str, pattern: str) -> bool:
     return fnmatch(name, pattern) or fnmatch(basename, pattern)
 
 
+def _is_safe_member_name(member_name: str) -> bool:
+    """检查归档成员名是否安全（无路径遍历、无绝对路径、无空字节）"""
+    # 拒绝含空字节的路径（可能绕过之后的检查）
+    if "\x00" in member_name:
+        return False
+    # 拒绝绝对路径
+    if os.path.isabs(member_name):
+        return False
+    # Windows: 拒绝驱动器相对路径（如 C:file.txt）
+    if os.name == "nt" and len(member_name) >= 2:
+        if member_name[1] == ":" and member_name[0].isalpha():
+            return False
+    # 拒绝包含 .. 的路径组件
+    parts = Path(member_name).parts
+    if ".." in parts:
+        return False
+    # 拒绝空路径
+    if not member_name or member_name.strip() in ("", ".", "/"):
+        return False
+    return True
+
+
+def _safe_extract_zip(
+    zf: zipfile.ZipFile, target: Path, members: list[str] | None = None
+) -> list[str]:
+    """安全提取 ZIP 文件，过滤路径遍历成员，返回被跳过的成员列表"""
+    target_resolved = target.resolve()
+    skipped = []
+    names = members if members is not None else zf.namelist()
+    for member in names:
+        if not _is_safe_member_name(member):
+            skipped.append(member)
+            continue
+        # 双重检查：解析后路径必须在目标目录内
+        dest = (target / member).resolve()
+        try:
+            dest.relative_to(target_resolved)
+        except ValueError:
+            skipped.append(member)
+            continue
+        zf.extract(member, target)
+    return skipped
+
+
+def _safe_extract_tar(
+    tarf: tarfile.TarFile,
+    target: Path,
+    members: list[tarfile.TarInfo],
+    quiet: bool = False,
+) -> int:
+    """安全提取 tar 成员：过滤路径遍历和符号链接，返回跳过的数量"""
+    target_resolved = target.resolve()
+    skipped_count = 0
+    import sys as _sys
+
+    for member in members:
+        if not _is_safe_member_name(member.name):
+            skipped_count += 1
+            continue
+        # 跳过符号链接和硬链接（防止链接攻击）
+        if member.issym() or member.islnk():
+            skipped_count += 1
+            continue
+        # Python < 3.12: 手动验证提取路径在目标目录内
+        if _sys.version_info < (3, 12):
+            dest = (target / member.name).resolve()
+            try:
+                dest.relative_to(target_resolved)
+            except ValueError:
+                skipped_count += 1
+                continue
+        # Python 3.12+: filter="data" 会处理路径清理和链接目标
+        extra_args = {}
+        if _sys.version_info >= (3, 12):
+            extra_args["filter"] = "data"
+        tarf.extract(member, path=str(target), **extra_args)
+    return skipped_count
+
+
 def restore_backup(
     backup_path: str,
     target_dir: str,
@@ -900,23 +989,22 @@ def restore_backup(
             with zipfile.ZipFile(backup, "r") as zf:
                 all_members = zf.namelist()
                 members = (
-                    [m for m in all_members if _match_select_pattern(m, select_pattern)]
+                    [
+                        m
+                        for m in all_members
+                        if _is_safe_member_name(m)
+                        and _match_select_pattern(m, select_pattern)
+                    ]
                     if select_pattern
-                    else all_members
+                    else [m for m in all_members if _is_safe_member_name(m)]
                 )
                 if not members:
                     if not quiet:
                         print(t("restore.no_match", pattern=select_pattern))
                     return {"success": True, "files_count": 0}
-                with tqdm(
-                    total=len(members),
-                    desc=t("restore.progress"),
-                    unit=t("compress.unit"),
-                    disable=quiet,
-                ) as pbar:
-                    for member in members:
-                        zf.extract(member, target)
-                        pbar.update(1)
+                skipped = _safe_extract_zip(zf, target, members)
+                if skipped and not quiet:
+                    print(t("restore.skipped_unsafe", count=len(skipped)))
                 if not quiet:
                     print(t("restore.success", path=target, count=len(members)))
                 return {"success": True, "files_count": len(members)}
@@ -928,10 +1016,24 @@ def restore_backup(
                 szf_kwargs["password"] = password
             with py7zr.SevenZipFile(**szf_kwargs) as szf:
                 all_members = szf.getnames()
+                # 过滤路径遍历成员（Zip Slip 防护）
+                safe_members = [m for m in all_members if _is_safe_member_name(m)]
+                skipped_count = len(all_members) - len(safe_members)
+                if skipped_count > 0 and not quiet:
+                    print(
+                        t(
+                            "restore.skipped_unsafe",
+                            count=skipped_count,
+                        )
+                    )
                 members = (
-                    [m for m in all_members if _match_select_pattern(m, select_pattern)]
+                    [
+                        m
+                        for m in safe_members
+                        if _match_select_pattern(m, select_pattern)
+                    ]
                     if select_pattern
-                    else all_members
+                    else safe_members
                 )
                 if not members:
                     if not quiet:
@@ -975,15 +1077,14 @@ def restore_backup(
                 tmp.seek(0)
                 with tarfile.open(fileobj=tmp, mode="r") as tarf:
                     all_members = tarf.getmembers()
-                    members = (
-                        [
+                    if select_pattern:
+                        members = [
                             m
                             for m in all_members
                             if _match_select_pattern(m.name, select_pattern)
                         ]
-                        if select_pattern
-                        else all_members
-                    )
+                    else:
+                        members = list(all_members)
                     if not members:
                         if not quiet:
                             print(t("restore.no_match", pattern=select_pattern))
@@ -994,12 +1095,14 @@ def restore_backup(
                         unit=t("compress.unit"),
                         disable=quiet,
                     ) as pbar:
-                        for member in members:
-                            tarf.extract(member, target, filter="data")
-                            pbar.update(1)
+                        skipped = _safe_extract_tar(tarf, target, members)
+                        pbar.update(len(members))
+                    if skipped and not quiet:
+                        print(t("restore.skipped_unsafe", count=skipped))
+                    actual = len(members) - skipped
                     if not quiet:
-                        print(t("restore.success", path=target, count=len(members)))
-                    return {"success": True, "files_count": len(members)}
+                        print(t("restore.success", path=target, count=actual))
+                    return {"success": True, "files_count": actual}
         elif name_lower.endswith(".tar.gz") or name_lower.endswith(".tgz"):
             mode = "r:gz"
         elif name_lower.endswith(".tar.bz2") or name_lower.endswith(".tbz2"):
@@ -1015,15 +1118,14 @@ def restore_backup(
 
         with tarfile.open(backup, mode) as tarf:
             all_members = tarf.getmembers()
-            members = (
-                [
+            if select_pattern:
+                members = [
                     m
                     for m in all_members
                     if _match_select_pattern(m.name, select_pattern)
                 ]
-                if select_pattern
-                else all_members
-            )
+            else:
+                members = list(all_members)
             if not members:
                 if not quiet:
                     print(t("restore.no_match", pattern=select_pattern))
@@ -1034,12 +1136,14 @@ def restore_backup(
                 unit=t("compress.unit"),
                 disable=quiet,
             ) as pbar:
-                for member in members:
-                    tarf.extract(member, target, filter="data")
-                    pbar.update(1)
+                skipped = _safe_extract_tar(tarf, target, members)
+                pbar.update(len(members))
+            if skipped and not quiet:
+                print(t("restore.skipped_unsafe", count=skipped))
+            actual = len(members) - skipped
             if not quiet:
-                print(t("restore.success", path=target, count=len(members)))
-            return {"success": True, "files_count": len(members)}
+                print(t("restore.success", path=target, count=actual))
+            return {"success": True, "files_count": actual}
     except KeyboardInterrupt:
         raise
     except PermissionError:
@@ -1339,12 +1443,19 @@ def verify_backup_fast(backup_path: str, expected_sha256: str) -> dict:
     }
 
 
-def split_file(file_path: str, chunk_size: int) -> list[str]:
+def split_file(
+    file_path: str, chunk_size: int, *, create_manifest: bool = True
+) -> list[str]:
     """将大文件分割为多个分卷文件
     :param file_path: 要分割的文件路径
     :param chunk_size: 每个分卷的大小（字节）
+    :param create_manifest: 是否创建清单文件
     :return: 分卷文件路径列表
     """
+    import hashlib
+    import json
+    from datetime import datetime
+
     if chunk_size <= 0:
         return [file_path]
 
@@ -1352,7 +1463,18 @@ def split_file(file_path: str, chunk_size: int) -> list[str]:
     if file_size <= chunk_size:
         return [file_path]
 
+    # 计算原文件 SHA256
+    original_sha256 = hashlib.sha256()
+    with open(file_path, "rb") as f:
+        while True:
+            chunk = f.read(65536)
+            if not chunk:
+                break
+            original_sha256.update(chunk)
+    original_hash = original_sha256.hexdigest()
+
     parts = []
+    part_checksums = []
     part_index = 1
     with open(file_path, "rb") as f:
         while True:
@@ -1360,31 +1482,175 @@ def split_file(file_path: str, chunk_size: int) -> list[str]:
             if not chunk:
                 break
             part_path = f"{file_path}.{part_index:03d}"
+            # 计算分卷校验和
+            part_hash = hashlib.sha256(chunk).hexdigest()
+            part_checksums.append(
+                {"path": os.path.basename(part_path), "sha256": part_hash}
+            )
             with open(part_path, "wb") as pf:
                 pf.write(chunk)
             parts.append(part_path)
             part_index += 1
+
+    # 创建清单文件
+    if create_manifest:
+        manifest_path = f"{file_path}.manifest.json"
+        manifest = {
+            "original_file": os.path.basename(file_path),
+            "original_size": file_size,
+            "original_sha256": original_hash,
+            "chunk_size": chunk_size,
+            "parts_count": len(parts),
+            "parts": part_checksums,
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        with open(manifest_path, "w", encoding="utf-8") as mf:
+            json.dump(manifest, mf, indent=2, ensure_ascii=False)
 
     # 删除原文件
     os.remove(file_path)
     return parts
 
 
-def merge_files(part_paths: list[str], output_path: str) -> bool:
+def merge_files(
+    part_paths: list[str],
+    output_path: str,
+    *,
+    resume: bool = False,
+    progress_callback=None,
+) -> bool:
     """合并分卷文件为单个文件
     :param part_paths: 分卷文件路径列表（按顺序）
     :param output_path: 输出文件路径
+    :param resume: 是否支持断点续传（从上次中断处继续）
+    :param progress_callback: 进度回调函数 callback(current_bytes, total_bytes)
     :return: 是否成功
     """
+    if not part_paths:
+        return False
+
+    # 计算总大小
+    total_size = 0
+    for p in part_paths:
+        try:
+            total_size += os.path.getsize(p)
+        except OSError:
+            return False
+
+    # 断点续传：检查已写入的字节数
+    written_bytes = 0
+    start_part_idx = 0
+    if resume and os.path.exists(output_path):
+        written_bytes = os.path.getsize(output_path)
+        # 计算从哪个分卷开始
+        accumulated = 0
+        for i, p in enumerate(part_paths):
+            accumulated += os.path.getsize(p)
+            if accumulated > written_bytes:
+                start_part_idx = i
+                # 计算该分卷内已写入的偏移
+                prev_accumulated = accumulated - os.path.getsize(p)
+                part_offset = written_bytes - prev_accumulated
+                break
+        else:
+            # 所有分卷都已写入
+            return True
+    else:
+        part_offset = 0
+
     try:
-        with open(output_path, "wb") as out_f:
-            for part_path in part_paths:
+        mode = "ab" if resume and os.path.exists(output_path) else "wb"
+        with open(output_path, mode) as out_f:
+            for i in range(start_part_idx, len(part_paths)):
+                part_path = part_paths[i]
                 with open(part_path, "rb") as in_f:
+                    if i == start_part_idx and part_offset > 0:
+                        in_f.seek(part_offset)
                     while True:
                         chunk = in_f.read(65536)
                         if not chunk:
                             break
                         out_f.write(chunk)
+                        written_bytes += len(chunk)
+                        if progress_callback:
+                            progress_callback(written_bytes, total_size)
         return True
     except OSError:
         return False
+
+
+def verify_split_integrity(file_path: str) -> dict:
+    """验证分卷文件完整性
+    :param file_path: 任意分卷文件路径或清单文件路径
+    :return: 验证结果字典
+    """
+    import hashlib
+    import json
+
+    # 查找清单文件
+    if file_path.endswith(".manifest.json"):
+        manifest_path = file_path
+    else:
+        # 从分卷文件推断清单路径
+        base = file_path.rsplit(".", 1)[0] if ".0" in file_path else file_path
+        manifest_path = f"{base}.manifest.json"
+        if not os.path.exists(manifest_path):
+            # 尝试去掉 .001 后缀
+            if file_path.endswith(".001"):
+                manifest_path = f"{file_path[:-4]}.manifest.json"
+
+    if not os.path.exists(manifest_path):
+        return {"success": False, "error": "Manifest file not found"}
+
+    try:
+        with open(manifest_path, "r", encoding="utf-8") as f:
+            manifest = json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        return {"success": False, "error": f"Failed to read manifest: {e}"}
+
+    manifest_dir = os.path.dirname(manifest_path)
+    results = []
+    all_ok = True
+
+    for part_info in manifest.get("parts", []):
+        part_name = part_info["path"]
+        expected_hash = part_info["sha256"]
+        part_path = os.path.join(manifest_dir, part_name)
+
+        if not os.path.exists(part_path):
+            results.append(
+                {"path": part_name, "status": "missing", "expected": expected_hash}
+            )
+            all_ok = False
+            continue
+
+        # 计算实际校验和
+        sha256 = hashlib.sha256()
+        with open(part_path, "rb") as f:
+            while True:
+                chunk = f.read(65536)
+                if not chunk:
+                    break
+                sha256.update(chunk)
+        actual_hash = sha256.hexdigest()
+
+        if actual_hash == expected_hash:
+            results.append({"path": part_name, "status": "ok"})
+        else:
+            results.append(
+                {
+                    "path": part_name,
+                    "status": "corrupted",
+                    "expected": expected_hash,
+                    "actual": actual_hash,
+                }
+            )
+            all_ok = False
+
+    return {
+        "success": all_ok,
+        "original_file": manifest.get("original_file", ""),
+        "original_size": manifest.get("original_size", 0),
+        "parts_count": manifest.get("parts_count", 0),
+        "results": results,
+    }

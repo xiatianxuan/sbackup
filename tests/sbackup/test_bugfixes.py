@@ -577,13 +577,12 @@ class TestSplitAndMergeFiles(unittest.TestCase):
         self.assertEqual(len(parts), 1)
 
     def test_merge_empty_list(self):
-        """空列表合并创建空文件"""
+        """空列表合并不创建文件并返回 False"""
         from sbackup.compression import merge_files
 
         output_path = os.path.join(self.test_dir, "empty.bin")
         result = merge_files([], output_path)
-        self.assertTrue(result)
-        self.assertEqual(os.path.getsize(output_path), 0)
+        self.assertFalse(result)
 
 
 class TestWebhookPreset(unittest.TestCase):
@@ -617,8 +616,11 @@ class TestParseGitignore(unittest.TestCase):
 
     def setUp(self):
         self.test_dir = tempfile.mkdtemp()
+        self.original_cwd = os.getcwd()
+        os.chdir(self.test_dir)
 
     def tearDown(self):
+        os.chdir(self.original_cwd)
         shutil.rmtree(self.test_dir, ignore_errors=True)
 
     def test_parse_gitignore_basic(self):

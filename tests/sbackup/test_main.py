@@ -763,5 +763,128 @@ class TestInitCommand(unittest.TestCase):
         self.assertIn("compression", data)
 
 
-if __name__ == "__main__":
-    unittest.main()
+class TestCompletionCommand(unittest.TestCase):
+    """测试 completion 命令"""
+
+    def setUp(self):
+        self.test_dir = tempfile.mkdtemp()
+        self.original_argv = sys.argv.copy()
+        self._root_handlers = logging.root.handlers[:]
+
+    def tearDown(self):
+        sys.argv = self.original_argv
+        shutil.rmtree(self.test_dir, ignore_errors=True)
+        logging.root.handlers = self._root_handlers
+
+    @patch("builtins.print")
+    def test_completion_bash(self, mock_print):
+        """测试 completion bash 输出补全脚本"""
+        os.chdir(self.test_dir)
+        sys.argv = ["sbackup", "--lang", "en_US", "completion", "bash"]
+        from sbackup import run
+
+        result = run()
+        self.assertEqual(result, 0)
+        printed = " ".join(str(c) for c in mock_print.call_args_list)
+        self.assertIn("complete -F", printed)
+
+    @patch("builtins.print")
+    def test_completion_zsh(self, mock_print):
+        """测试 completion zsh 输出补全脚本"""
+        os.chdir(self.test_dir)
+        sys.argv = ["sbackup", "--lang", "en_US", "completion", "zsh"]
+        from sbackup import run
+
+        result = run()
+        self.assertEqual(result, 0)
+        printed = " ".join(str(c) for c in mock_print.call_args_list)
+        self.assertIn("#compdef", printed)
+
+    @patch("builtins.print")
+    def test_completion_default_shell(self, mock_print):
+        """测试 completion 无参数默认 bash"""
+        os.chdir(self.test_dir)
+        sys.argv = ["sbackup", "--lang", "en_US", "completion"]
+        from sbackup import run
+
+        result = run()
+        self.assertEqual(result, 0)
+        printed = " ".join(str(c) for c in mock_print.call_args_list)
+        self.assertIn("complete -F", printed)
+
+    @patch("builtins.print")
+    def test_completion_fish(self, mock_print):
+        """测试 completion fish 输出补全脚本"""
+        os.chdir(self.test_dir)
+        sys.argv = ["sbackup", "--lang", "en_US", "completion", "fish"]
+        from sbackup import run
+
+        result = run()
+        self.assertEqual(result, 0)
+        printed = " ".join(str(c) for c in mock_print.call_args_list)
+        self.assertIn("complete -c sbackup", printed)
+
+    @patch("builtins.print")
+    def test_completion_powershell(self, mock_print):
+        """测试 completion powershell 输出补全脚本"""
+        os.chdir(self.test_dir)
+        sys.argv = ["sbackup", "--lang", "en_US", "completion", "powershell"]
+        from sbackup import run
+
+        result = run()
+        self.assertEqual(result, 0)
+        printed = " ".join(str(c) for c in mock_print.call_args_list)
+        self.assertIn("Register-ArgumentCompleter", printed)
+
+
+class TestLockIntegration(unittest.TestCase):
+    """测试锁与 CLI 集成"""
+
+    def setUp(self):
+        self.test_dir = tempfile.mkdtemp()
+        self.original_argv = sys.argv.copy()
+        self._root_handlers = logging.root.handlers[:]
+        self._root_level = logging.root.level
+        self.data_path = os.path.join(self.test_dir, "sbackup.json")
+        with open(os.path.join(self.test_dir, "config.json"), "w") as f:
+            json.dump({"data_file": self.data_path}, f)
+        self.dest_dir = os.path.join(self.test_dir, "backup_dest")
+        os.makedirs(self.dest_dir, exist_ok=True)
+
+    def tearDown(self):
+        sys.argv = self.original_argv
+        shutil.rmtree(self.test_dir, ignore_errors=True)
+        logging.root.handlers = self._root_handlers
+        logging.root.setLevel(self._root_level)
+
+    @patch("sbackup.cli.BackupManager.execute_backups")
+    @patch("builtins.print")
+    def test_save_acquires_lock(self, mock_print, mock_execute):
+        """测试 save 命令获取锁"""
+        os.chdir(self.test_dir)
+        from sbackup import run
+
+        sys.argv = ["sbackup", "--lang", "en_US", "save"]
+        result = run()
+        self.assertEqual(result, 0)
+        mock_execute.assert_called_once()
+
+    @patch("sbackup.cli.BackupManager.execute_backups")
+    @patch("builtins.print")
+    def test_save_lock_conflict(self, mock_print, mock_execute):
+        """测试 save 锁冲突"""
+        os.chdir(self.test_dir)
+        from sbackup import run
+
+        # 手动创建锁文件，模拟另一个运行的进程
+        from sbackup.lock import BackupLock
+
+        lock = BackupLock(self.test_dir)
+        lock.acquire()
+
+        sys.argv = ["sbackup", "--lang", "en_US", "save"]
+        result = run()
+        # save 尝试获取锁应该失败（锁被我们持有）
+        self.assertNotEqual(result, 0)
+        mock_execute.assert_not_called()
+        lock.release()

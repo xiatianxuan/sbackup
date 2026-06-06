@@ -3,6 +3,7 @@
 """
 
 import os
+import sys
 import time
 import tempfile
 import shutil
@@ -228,9 +229,14 @@ class TestPrePostHooks(unittest.TestCase):
         time.sleep(0.1)
         (Path(self.source_dir) / "new.txt").write_text("new")
 
-        # 使用 echo 创建标记文件（Windows cmd 兼容）
-        marker = self.hook_marker.replace("\\", "/")
-        hook_cmd = f'echo done > "{marker}"'
+        # 使用 Python 创建标记文件（shlex.split + shell=False 兼容）
+        hook_cmd = (
+            '"'
+            + sys.executable
+            + '" -c "open(r\''
+            + self.hook_marker
+            + "', 'w').write('done')\""
+        )
 
         self.manager.execute_backups(pre_hooks=[hook_cmd])
         self.assertTrue(os.path.exists(self.hook_marker), "前置钩子应被执行")
@@ -241,8 +247,14 @@ class TestPrePostHooks(unittest.TestCase):
         time.sleep(0.1)
         (Path(self.source_dir) / "new.txt").write_text("new")
 
-        marker = self.hook_marker.replace("\\", "/")
-        hook_cmd = f'echo done > "{marker}"'
+        # 使用 Python 创建标记文件（shlex.split + shell=False 兼容）
+        hook_cmd = (
+            '"'
+            + sys.executable
+            + '" -c "open(r\''
+            + self.hook_marker
+            + "', 'w').write('done')\""
+        )
 
         self.manager.execute_backups(post_hooks=[hook_cmd])
         self.assertTrue(os.path.exists(self.hook_marker), "后置钩子应被执行")
@@ -282,10 +294,16 @@ class TestPrePostHooks(unittest.TestCase):
 
         marker1 = os.path.join(self.test_dir, "hook1.txt")
         marker2 = os.path.join(self.test_dir, "hook2.txt")
-        m1 = marker1.replace("\\", "/")
-        m2 = marker2.replace("\\", "/")
 
-        self.manager.execute_backups(pre_hooks=[f'echo 1 > "{m1}"', f'echo 2 > "{m2}"'])
+        # 使用 Python 创建标记文件（shlex.split + shell=False 兼容）
+        hook1 = (
+            '"' + sys.executable + '" -c "open(r\'' + marker1 + "', 'w').write('1')\""
+        )
+        hook2 = (
+            '"' + sys.executable + '" -c "open(r\'' + marker2 + "', 'w').write('2')\""
+        )
+
+        self.manager.execute_backups(pre_hooks=[hook1, hook2])
         self.assertTrue(os.path.exists(marker1))
         self.assertTrue(os.path.exists(marker2))
 
@@ -297,8 +315,15 @@ class TestRunHooks(unittest.TestCase):
         """有效命令执行成功"""
         with tempfile.TemporaryDirectory() as tmpdir:
             marker = os.path.join(tmpdir, "marker.txt")
-            m = marker.replace("\\", "/")
-            BackupManager._run_hooks([f'echo ok > "{m}"'], "pre")
+            # 使用 Python 创建标记文件（shlex.split + shell=False 兼容）
+            hook_cmd = (
+                '"'
+                + sys.executable
+                + '" -c "open(r\''
+                + marker
+                + "', 'w').write('ok')\""
+            )
+            BackupManager._run_hooks([hook_cmd], "pre")
             self.assertTrue(os.path.exists(marker))
 
     def test_run_hooks_with_empty_list(self):

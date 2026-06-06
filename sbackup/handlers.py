@@ -2,9 +2,36 @@
 
 import getpass
 import logging
+import os
+import sys
 from sbackup.i18n import t
 
 logger = logging.getLogger(__name__)
+
+
+def _validate_remote_filename(filename: str) -> str | None:
+    """验证远程文件名安全性，返回净化后的文件名或 None（不安全时）
+    只允许纯文件名，拒绝路径分隔符和 .. 序列
+    """
+    if not filename:
+        return None
+    # 拒绝 null 字节注入
+    if "\x00" in filename:
+        return None
+    # 拒绝路径分隔符
+    if "/" in filename or "\\" in filename:
+        return None
+    # 拒绝 .. 序列
+    if ".." in filename:
+        return None
+    # 拒绝绝对路径
+    if os.path.isabs(filename):
+        return None
+    # 只取 basename（防御性编程）
+    safe_name = os.path.basename(filename)
+    if not safe_name or safe_name in (".", ".."):
+        return None
+    return safe_name
 
 
 def _resolve_sftp_auth(
@@ -84,6 +111,18 @@ def handle_sftp(args, config) -> int:
         user = args.user or input(t("cli.prompt.sftp.user") + " ")
         key_file_input = args.key_file or input(t("cli.prompt.sftp.key_file") + " ")
 
+        # 警告：通过 CLI 传递密码会暴露在进程列表中
+        if args.password:
+            print(
+                t("warn.password_in_cli", arg="--password"),
+                file=sys.stderr,
+            )
+        if args.key_passphrase:
+            print(
+                t("warn.password_in_cli", arg="--key-passphrase"),
+                file=sys.stderr,
+            )
+
         key_file, key_passphrase, password = _resolve_sftp_auth(
             key_file_input,
             args.key_passphrase or "",
@@ -153,6 +192,12 @@ def handle_webdav(args, config) -> int:
         # 交互式配置
         url = args.url or input(t("cli.prompt.webdav.url") + " ")
         user = args.user or input(t("cli.prompt.webdav.user") + " ")
+        # 警告：通过 CLI 传递密码会暴露在进程列表中
+        if args.password:
+            print(
+                t("warn.password_in_cli", arg="--password"),
+                file=sys.stderr,
+            )
         password = args.password or getpass.getpass(
             t("cli.prompt.webdav.password") + " "
         )
@@ -265,7 +310,11 @@ def _handle_remote_sftp(args, config) -> int:
                 return 0
 
             elif args.remote_action == "rm":
-                remote_path = config.sftp_remote_path.rstrip("/") + "/" + args.filename
+                safe_name = _validate_remote_filename(args.filename)
+                if not safe_name:
+                    print(t("err.invalid_filename", filename=args.filename))
+                    return 1
+                remote_path = config.sftp_remote_path.rstrip("/") + "/" + safe_name
                 client.delete_remote_file(remote_path)
                 print(t("cmd.remote.deleted", path=remote_path))
                 return 0
@@ -315,7 +364,11 @@ def _handle_remote_webdav(args, config) -> int:
             return 0
 
         elif args.remote_action == "rm":
-            remote_path = config.webdav_remote_path.rstrip("/") + "/" + args.filename
+            safe_name = _validate_remote_filename(args.filename)
+            if not safe_name:
+                print(t("err.invalid_filename", filename=args.filename))
+                return 1
+            remote_path = config.webdav_remote_path.rstrip("/") + "/" + safe_name
             client.delete_remote_file(remote_path)
             print(t("cmd.remote.deleted", path=remote_path))
             return 0

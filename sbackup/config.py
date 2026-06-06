@@ -27,7 +27,7 @@ def _load_json_file(config_file: str) -> dict:
 
 
 def _save_json_file(data: dict, config_file: str) -> None:
-    """将字典写入 JSON 配置文件，自动创建目录"""
+    """将字典写入 JSON 配置文件，自动创建目录，设置限制性权限"""
     data_dir = os.path.dirname(config_file)
     if data_dir:
         try:
@@ -36,11 +36,35 @@ def _save_json_file(data: dict, config_file: str) -> None:
             logger.error(t("log.config.mkdir.error"), data_dir, e)
             return
 
+    # 原子写入：先写临时文件再替换
+    tmp_path = config_file + ".tmp"
     try:
-        with open(config_file, "w", encoding="utf-8") as f:
+        with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=4)
+            f.flush()
+            os.fsync(f.fileno())
+        # 设置临时文件限制性权限（仅所有者可读写）
+        if sys.platform != "win32":
+            try:
+                os.chmod(tmp_path, 0o600)
+            except OSError:
+                pass
+        os.replace(tmp_path, config_file)
     except OSError as e:
         logger.error(t("log.config.write.error"), config_file, e)
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+        return
+
+    # 设置限制性文件权限（仅所有者可读写）
+    if sys.platform != "win32":
+        try:
+            os.chmod(config_file, 0o600)
+        except OSError:
+            pass  # 权限设置失败不影响主流程
 
 
 def get_default_data_file() -> str:
@@ -101,6 +125,15 @@ class Config:
     webdav_password: str = ""
     webdav_remote_path: str = "/"
     webdav_enabled: bool = False
+    # SMTP 邮件通知配置
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_user: str = ""
+    smtp_password: str = ""
+    smtp_from: str = ""
+    smtp_to: str = ""
+    smtp_tls: bool = True
+    smtp_enabled: bool = False
 
 
 def load_config(config_file: str = "config.json") -> Config:
@@ -141,6 +174,22 @@ def load_config(config_file: str = "config.json") -> Config:
         if webhook_url_legacy and not webhook_urls:
             webhook_urls = [webhook_url_legacy]
     webdav_config = config_data.get("webdav", {})
+    smtp_config = config_data.get("smtp", {})
+
+    # 验证端口范围（1-65535）
+    sftp_port = sftp_config.get("port", 22)
+    if not isinstance(sftp_port, int) or not (1 <= sftp_port <= 65535):
+        logger.warning(
+            "SFTP port %s is out of range (1-65535), using default 22", sftp_port
+        )
+        sftp_port = 22
+
+    smtp_port = smtp_config.get("port", 587)
+    if not isinstance(smtp_port, int) or not (1 <= smtp_port <= 65535):
+        logger.warning(
+            "SMTP port %s is out of range (1-65535), using default 587", smtp_port
+        )
+        smtp_port = 587
 
     return Config(
         folder_path="",
@@ -158,7 +207,7 @@ def load_config(config_file: str = "config.json") -> Config:
         webhook_template=webhook_template,
         webhook_retries=webhook_retries,
         sftp_host=sftp_config.get("host", ""),
-        sftp_port=sftp_config.get("port", 22),
+        sftp_port=sftp_port,
         sftp_user=sftp_config.get("user", ""),
         sftp_password=sftp_config.get("password", ""),
         sftp_key_file=sftp_config.get("key_file", ""),
@@ -170,6 +219,14 @@ def load_config(config_file: str = "config.json") -> Config:
         webdav_password=webdav_config.get("password", ""),
         webdav_remote_path=webdav_config.get("remote_path", "/"),
         webdav_enabled=webdav_config.get("enabled", False),
+        smtp_host=smtp_config.get("host", ""),
+        smtp_port=smtp_port,
+        smtp_user=smtp_config.get("user", ""),
+        smtp_password=smtp_config.get("password", ""),
+        smtp_from=smtp_config.get("from", ""),
+        smtp_to=smtp_config.get("to", ""),
+        smtp_tls=smtp_config.get("tls", True),
+        smtp_enabled=smtp_config.get("enabled", False),
     )
 
 
@@ -277,6 +334,7 @@ _SENSITIVE_FIELDS = [
     ("sftp", "password"),
     ("sftp", "key_passphrase"),
     ("webdav", "password"),
+    ("smtp", "password"),
 ]
 
 
@@ -284,28 +342,46 @@ def _derive_key(master_password: str, salt: bytes) -> bytes:
     """从主密码派生加密密钥"""
     import hashlib
 
-    return hashlib.pbkdf2_hmac("sha256", master_password.encode("utf-8"), salt, 100_000)
+    return hashlib.pbkdf2_hmac("sha256", master_password.encode("utf-8"), salt, 600_000)
 
 
 def _encrypt_value(value: str, key: bytes) -> str:
-    """加密单个字符串值，返回 base64 编码的 salt+密文"""
+    """加密单个字符串值，返回 base64 编码的 salt+密文+HMAC（完整性校验）"""
     import base64
+    import hashlib
+    import hmac as _hmac
 
     salt = os.urandom(16)
     derived = _derive_key(key.hex(), salt)
     encrypted = bytes(
         a ^ b for a, b in zip(value.encode("utf-8"), derived[: len(value)])
     )
-    return base64.b64encode(salt + encrypted).decode("ascii")
+    # 添加 HMAC 完整性校验（使用派生密钥的后 32 字节作为 HMAC 密钥）
+    hmac_key = hashlib.sha256(key + b"hmac_key").digest()
+    mac = _hmac.new(hmac_key, salt + encrypted, "sha256").digest()
+    return base64.b64encode(salt + encrypted + mac).decode("ascii")
 
 
 def _decrypt_value(encrypted_value: str, key: bytes) -> str:
-    """解密单个字符串值"""
+    """解密单个字符串值（验证 HMAC 完整性）"""
     import base64
+    import hashlib
+    import hmac as _hmac
 
     data = base64.b64decode(encrypted_value)
+    # 提取 HMAC（最后 32 字节）
+    if len(data) < 48:  # 16 (salt) + 0 (min ciphertext) + 32 (hmac)
+        raise ValueError("Invalid encrypted data: too short")
     salt = data[:16]
-    ciphertext = data[16:]
+    mac_received = data[-32:]
+    ciphertext = data[16:-32]
+
+    # 验证 HMAC 完整性
+    hmac_key = hashlib.sha256(key + b"hmac_key").digest()
+    mac_expected = _hmac.new(hmac_key, salt + ciphertext, "sha256").digest()
+    if not _hmac.compare_digest(mac_received, mac_expected):
+        raise ValueError("HMAC verification failed: data may have been tampered with")
+
     derived = _derive_key(key.hex(), salt)
     decrypted = bytes(a ^ b for a, b in zip(ciphertext, derived[: len(ciphertext)]))
     return decrypted.decode("utf-8")
@@ -319,10 +395,18 @@ def encrypt_config(master_password: str, config_file: str = "config.json") -> bo
     if not data:
         return False
 
-    import hashlib
+    import base64
 
-    # 用主密码的哈希作为加密密钥
-    key = hashlib.sha256(master_password.encode("utf-8")).digest()
+    # 读取或生成盐值（存储在配置中以备解密）
+    salt_b64 = data.get("_key_salt")
+    if salt_b64:
+        salt = base64.b64decode(salt_b64)
+    else:
+        salt = os.urandom(16)
+        data["_key_salt"] = base64.b64encode(salt).decode("ascii")
+
+    # 使用 PBKDF2 派生加密密钥（600K 迭代）
+    key = _derive_key(master_password, salt)
 
     for field_path in _SENSITIVE_FIELDS:
         obj = data
@@ -346,9 +430,14 @@ def decrypt_config(master_password: str, config_file: str = "config.json") -> bo
     if not data or not data.get("_encrypted"):
         return True  # 未加密，视为成功
 
-    import hashlib
+    import base64
 
-    key = hashlib.sha256(master_password.encode("utf-8")).digest()
+    salt_b64 = data.get("_key_salt")
+    if not salt_b64:
+        return False  # 缺少盐值，无法解密
+    salt = base64.b64decode(salt_b64)
+
+    key = _derive_key(master_password, salt)
 
     try:
         for field_path in _SENSITIVE_FIELDS:
@@ -416,6 +505,12 @@ def parse_gitignore(gitignore_path: str) -> list[str]:
     """
     if not os.path.isfile(gitignore_path):
         return []
+
+    # 安全检查：确保路径在当前工作目录内
+    cwd = os.path.realpath(os.getcwd())
+    real_path = os.path.realpath(gitignore_path)
+    if os.path.commonpath([cwd, real_path]) != cwd:
+        raise ValueError("gitignore path must be within the current working directory")
 
     patterns = []
     try:
