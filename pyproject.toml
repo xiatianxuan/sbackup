@@ -21,6 +21,7 @@ dependencies = [
     "minio>=7.2.20",
     "paramiko>=4.0.0",
     "py7zr>=1.1.0",
+    "reedsolo>=1.7.0",
     "tqdm>=4.67.3",
     "watchdog>=6.0.0",
     "zstandard>=0.25.0",
