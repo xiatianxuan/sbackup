@@ -148,6 +148,10 @@ class Config:
     smtp_to: str = ""
     smtp_tls: bool = True
     smtp_enabled: bool = False
+    # 备份轮转策略
+    rotation_keep_count: int = 0
+    rotation_keep_days: int = 0
+    rotation_keep_daily: int = 0
     # 内部字段：配置校验和（用于检测意外修改）
     _config_checksum: str = ""
 
@@ -208,6 +212,11 @@ def load_config(config_file: str = "config.json") -> Config:
         )
         smtp_port = 587
 
+    rotation_config = config_data.get("rotation", {})
+    rotation_keep_count = rotation_config.get("keep_count", 0)
+    rotation_keep_days = rotation_config.get("keep_days", 0)
+    rotation_keep_daily = rotation_config.get("keep_daily", 0)
+
     return Config(
         folder_path="",
         zipfile_path=None,
@@ -252,6 +261,9 @@ def load_config(config_file: str = "config.json") -> Config:
         smtp_to=smtp_config.get("to", ""),
         smtp_tls=smtp_config.get("tls", True),
         smtp_enabled=smtp_config.get("enabled", False),
+        rotation_keep_count=rotation_keep_count,
+        rotation_keep_days=rotation_keep_days,
+        rotation_keep_daily=rotation_keep_daily,
     )
 
 

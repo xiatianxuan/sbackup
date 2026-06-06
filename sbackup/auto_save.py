@@ -800,6 +800,62 @@ class BackupManager:
         # 执行后置钩子
         self._run_hooks(post_hooks or [], "post")
 
+        # 备份完成后自动轮转（如果有 rotation 配置）
+        rotation_count = getattr(config, "rotation_keep_count", 0)
+        rotation_days = getattr(config, "rotation_keep_days", 0)
+        rotation_daily = getattr(config, "rotation_keep_daily", 0)
+        if rotation_count > 0 or rotation_days > 0 or rotation_daily > 0:
+            self._auto_rotate(
+                config,
+                keep_count=rotation_count,
+                keep_days=rotation_days,
+                keep_daily=rotation_daily,
+            )
+
+    def _auto_rotate(
+        self,
+        config: Config,
+        keep_count: int = 0,
+        keep_days: int = 0,
+        keep_daily: int = 0,
+    ) -> None:
+        """备份完成后自动轮转所有策略的目标目录"""
+        from sbackup.rotation import BackupRotator, RotationPolicy
+
+        # 收集所有策略的目标目录
+        target_dirs: set[str] = set()
+        for key, raw in self.data.items():
+            if key in (_HISTORY_KEY, "_file_meta", "_chunk_meta"):
+                continue
+            entry = BackupEntry.from_list(raw)
+            if entry.target:
+                target_dirs.add(entry.target)
+
+        policy = RotationPolicy(
+            keep_count=keep_count,
+            keep_days=keep_days,
+            keep_daily=keep_daily,
+            dry_run=False,
+        )
+
+        total_deleted = 0
+        for target_dir in target_dirs:
+            if not os.path.isdir(target_dir):
+                continue
+            try:
+                rotator = BackupRotator(target_dir, policy)
+                deleted_count, _ = rotator.execute()
+                if deleted_count > 0:
+                    print(
+                        t(
+                            "cmd.rotate.auto_done",
+                            deleted=deleted_count,
+                        )
+                    )
+                    total_deleted += deleted_count
+            except Exception as e:
+                logger.warning("Auto-rotation failed for %s: %s", target_dir, e)
+
     @staticmethod
     def _run_hooks(hooks: list[str], hook_type: str) -> None:
         """执行钩子命令列表

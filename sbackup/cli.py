@@ -7,7 +7,7 @@ import logging
 from typing import NoReturn
 from sbackup.auto_save import BackupManager
 from sbackup.i18n import set_locale, t
-from sbackup.config import load_config, save_lang, save_format
+from sbackup.config import Config, load_config, save_lang, save_format
 from sbackup.compression import restore_backup
 
 VERSION = "1.0.1"
@@ -217,6 +217,36 @@ def get_parser() -> argparse.ArgumentParser:
         type=int,
         default=1,
         help=t("cli.help.save.threads"),
+    )
+    save_parser.add_argument(
+        "--strict",
+        action="store_true",
+        default=False,
+        help=t("cli.help.strict"),
+    )
+
+    compress_parser = subparsers.add_parser("compress", help=t("cli.help.compress"))
+    compress_parser.add_argument("source", help=t("cli.help.compress.source"))
+    compress_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        default=False,
+        help=t("cli.help.compress.dry_run"),
+    )
+    compress_parser.add_argument(
+        "--format",
+        default=None,
+        choices=["zip", "tar", "tar.gz", "tar.bz2", "tar.xz", "tar.zst", "7z"],
+        help=t("cli.help.compress.format"),
+    )
+    compress_parser.add_argument(
+        "-o",
+        "--output",
+        default=None,
+        help=t("cli.help.compress.output"),
+    )
+    compress_parser.add_argument(
+        "--password", default="", help=t("cli.help.compress.password")
     )
 
     watch_parser = subparsers.add_parser("watch", help=t("cli.help.watch"))
@@ -599,6 +629,52 @@ def get_parser() -> argparse.ArgumentParser:
         help=t("cli.help.clean.dry_run"),
     )
 
+    rotate_parser = subparsers.add_parser("rotate", help=t("cli.help.rotate"))
+    rotate_sub = rotate_parser.add_subparsers(
+        dest="rotate_action", help="rotate action"
+    )
+    rotate_list_parser = rotate_sub.add_parser("list", help=t("cli.help.rotate_list"))
+    rotate_list_parser.add_argument(
+        "backup_dir", help=t("cli.help.rotate_list.backup_dir")
+    )
+    rotate_parser.add_argument(
+        "backup_dir", nargs="?", default=None, help=t("cli.help.rotate.backup_dir")
+    )
+    rotate_parser.add_argument(
+        "--keep-count",
+        type=int,
+        default=0,
+        help=t("cli.help.rotate.keep_count"),
+    )
+    rotate_parser.add_argument(
+        "--keep-days",
+        type=int,
+        default=0,
+        help=t("cli.help.rotate.keep_days"),
+    )
+    rotate_parser.add_argument(
+        "--keep-daily",
+        type=int,
+        default=0,
+        help=t("cli.help.rotate.keep_daily"),
+    )
+    rotate_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        default=False,
+        help=t("cli.help.rotate.dry_run"),
+    )
+
+    diskcheck_parser = subparsers.add_parser("diskcheck", help=t("cli.help.diskcheck"))
+    diskcheck_parser.add_argument("source", help=t("cli.help.diskcheck.source"))
+    diskcheck_parser.add_argument("target", help=t("cli.help.diskcheck.target"))
+    diskcheck_parser.add_argument(
+        "--level",
+        type=int,
+        default=6,
+        help=t("cli.help.diskcheck.level"),
+    )
+
     subparsers.add_parser("version", help=t("cli.help.version"))
 
     subparsers.add_parser("wizard", help=t("cli.help.wizard"))
@@ -796,33 +872,132 @@ def _handle_save(args, config, manager) -> int:
         print(t("err.lock.conflict"))
         return 1
     try:
-        manager.execute_backups(
-            keep=args.keep,
-            keep_days=args.keep_days,
-            password=args.password,
-            sftp_upload=args.sftp,
-            webdav_upload=args.webdav,
-            cloud_upload=args.cloud,
-            dry_run=args.dry_run,
-            verify=args.verify,
-            name_template=args.name_template,
-            webhook_url=args.webhook,
-            follow_symlinks=args.follow_symlinks,
-            max_size=_parse_size(args.max_size) if args.max_size else 0,
-            min_size=_parse_size(args.min_size) if args.min_size else 0,
-            max_age_seconds=_parse_duration(args.older_than) if args.older_than else 0,
-            incremental=args.incremental,
-            split_size=_parse_size(args.split) if args.split else 0,
-            tag=args.tag or "",
-            checksum=args.checksum,
-            pre_hooks=getattr(args, "pre_hook", None) or [],
-            post_hooks=getattr(args, "post_hook", None) or [],
-            dedup=args.dedup,
-            threads=args.threads,
-        )
+        if args.dry_run:
+            # 使用 DryRunScanner 生成详细的预览报告
+            from sbackup.dryrun import DryRunScanner
+
+            for key, raw in manager.data.items():
+                if key in ("_history", "_file_meta"):
+                    continue
+                from sbackup.auto_save import BackupEntry
+
+                entry = BackupEntry.from_list(raw)
+                source_dir = key
+                if not os.path.isdir(source_dir):
+                    continue
+                scan_config = Config(
+                    folder_path=source_dir,
+                    skip_patterns=entry.skip_patterns,
+                    include_patterns=getattr(entry, "include_patterns", []),
+                    exclude_patterns=getattr(entry, "exclude_patterns", []),
+                    max_size=_parse_size(args.max_size) if args.max_size else 0,
+                    min_size=_parse_size(args.min_size) if args.min_size else 0,
+                    follow_symlinks=args.follow_symlinks,
+                )
+                scanner = DryRunScanner(source_dir, scan_config)
+                result = scanner.scan()
+                print(scanner.format_summary(result, lang=config.lang))
+                print()
+        else:
+            # 备份前磁盘空间检查
+            from sbackup.diskcheck import DiskChecker
+            from sbackup.diskcheck import _format_size as _fmt_size
+
+            strict = getattr(args, "strict", False)
+            for key, raw in manager.data.items():
+                if key in ("_history", "_file_meta"):
+                    continue
+                from sbackup.auto_save import BackupEntry
+
+                entry = BackupEntry.from_list(raw)
+                source_dir = key
+                target_dir = entry.target
+                if not os.path.isdir(source_dir):
+                    continue
+                fmt = config.compression_format
+                level = config.compression_level
+                checker = DiskChecker(source_dir, target_dir)
+                info = checker.check(fmt=fmt, compression_level=level)
+                if not info.enough:
+                    report = checker.format_report(info, lang=config.lang)
+                    print(report)
+                    if strict:
+                        print(
+                            t(
+                                "diskcheck.insufficient",
+                                needed=_fmt_size(info.estimated_backup),
+                                available=_fmt_size(info.free),
+                                missing=_fmt_size(abs(info.margin)),
+                            )
+                        )
+                        return 1
+
+            manager.execute_backups(
+                keep=args.keep,
+                keep_days=args.keep_days,
+                password=args.password,
+                sftp_upload=args.sftp,
+                webdav_upload=args.webdav,
+                cloud_upload=args.cloud,
+                dry_run=False,
+                verify=args.verify,
+                name_template=args.name_template,
+                webhook_url=args.webhook,
+                follow_symlinks=args.follow_symlinks,
+                max_size=_parse_size(args.max_size) if args.max_size else 0,
+                min_size=_parse_size(args.min_size) if args.min_size else 0,
+                max_age_seconds=_parse_duration(args.older_than)
+                if args.older_than
+                else 0,
+                incremental=args.incremental,
+                split_size=_parse_size(args.split) if args.split else 0,
+                tag=args.tag or "",
+                checksum=args.checksum,
+                pre_hooks=getattr(args, "pre_hook", None) or [],
+                post_hooks=getattr(args, "post_hook", None) or [],
+                dedup=args.dedup,
+                threads=args.threads,
+            )
     finally:
         lock.release()
     return 0
+
+
+def _handle_compress(args, config, manager) -> int:
+    """处理 compress 子命令：直接压缩指定文件夹"""
+    source = parse_path(args.source)
+    if not os.path.isdir(source):
+        print(t("err.folder.invalid", path=source))
+        return 1
+
+    # 构建 Config
+    fmt = args.format.upper().replace(".", "_") if args.format else None
+    compress_config = Config(
+        folder_path=source,
+        compression_format=fmt or config.compression_format,
+        skip_patterns=config.skip_patterns,
+        password=args.password or config.password,
+        follow_symlinks=args.follow_symlinks,
+        name_template=config.name_template,
+    )
+    if args.output:
+        compress_config.zipfile_path = args.output
+
+    if args.dry_run:
+        # Dry-run: 使用 DryRunScanner 扫描并显示预览
+        from sbackup.dryrun import DryRunScanner
+
+        scanner = DryRunScanner(source, compress_config)
+        result = scanner.scan()
+        print(scanner.format_summary(result, lang=config.lang))
+        return 0
+
+    # 实际执行压缩
+    from sbackup.compression import create_compressor
+
+    compressor = create_compressor(compress_config)
+    result = compressor.compress()
+    return 0 if result.get("success") else 1
 
 
 def _handle_watch(args, config, manager) -> int:
@@ -1351,6 +1526,131 @@ def _handle_clean(args, config, manager) -> int:
     return 0
 
 
+def _format_size(size_bytes: int) -> str:
+    """格式化文件大小为可读字符串"""
+    if size_bytes < 1024:
+        return f"{size_bytes} B"
+    elif size_bytes < 1024 * 1024:
+        return f"{size_bytes / 1024:.1f} KB"
+    else:
+        return f"{size_bytes / (1024 * 1024):.2f} MB"
+
+
+def _handle_rotate(args, config, manager) -> int:
+    """处理 rotate 子命令"""
+    from sbackup.rotation import BackupRotator, RotationPolicy
+
+    action = getattr(args, "rotate_action", None)
+
+    if action == "list":
+        backup_dir = parse_path(args.backup_dir)
+        if not os.path.isdir(backup_dir):
+            print(t("err.folder.invalid", path=backup_dir))
+            return 1
+        rotator = BackupRotator(backup_dir, RotationPolicy())
+        backups = rotator.scan_backups()
+        if not backups:
+            print(t("cmd.rotate.scan_empty", path=backup_dir))
+            return 0
+        print(t("cmd.rotate.scan_found", count=len(backups), path=backup_dir))
+        for b in backups:
+            print(
+                t(
+                    "cmd.rotate.scan_item",
+                    name=b["name"],
+                    size=_format_size(b["size"]),
+                    time=b["mtime_iso"],
+                )
+            )
+        return 0
+
+    # 默认 rotate 行为：根据策略清理
+    backup_dir = getattr(args, "backup_dir", None)
+    if not backup_dir:
+        print(t("cli.help.rotate"))
+        return 1
+
+    backup_dir = parse_path(backup_dir)
+    if not os.path.isdir(backup_dir):
+        print(t("err.folder.invalid", path=backup_dir))
+        return 1
+
+    # CLI 参数优先，未指定时从 config 获取
+    keep_count = args.keep_count
+    keep_days = args.keep_days
+    keep_daily = args.keep_daily
+    if keep_count <= 0:
+        keep_count = config.rotation_keep_count
+    if keep_days <= 0:
+        keep_days = config.rotation_keep_days
+    if keep_daily <= 0:
+        keep_daily = config.rotation_keep_daily
+
+    if keep_count <= 0 and keep_days <= 0 and keep_daily <= 0:
+        print(t("cmd.clean.no_criteria"))
+        return 1
+
+    policy = RotationPolicy(
+        keep_count=keep_count,
+        keep_days=keep_days,
+        keep_daily=keep_daily,
+        dry_run=args.dry_run,
+    )
+    rotator = BackupRotator(backup_dir, policy)
+    _keep_list, delete_list = rotator.plan()
+
+    if not delete_list:
+        print(t("cmd.rotate.no_action"))
+        return 0
+
+    if args.dry_run:
+        print(t("cmd.rotate.dry_run_header"))
+        for item in delete_list:
+            print(
+                t(
+                    "cmd.rotate.dry_run_item",
+                    name=item["name"],
+                    size=_format_size(item["size"]),
+                    time=item["mtime_iso"],
+                )
+            )
+    else:
+        print(t("cmd.rotate.plan_delete", count=len(delete_list)))
+        for item in delete_list:
+            print(
+                t(
+                    "cmd.rotate.delete_item",
+                    name=item["name"],
+                    size=_format_size(item["size"]),
+                )
+            )
+
+    deleted_count, deleted_paths = rotator.execute()
+    if deleted_count > 0 and not args.dry_run:
+        print(t("cmd.rotate.done", count=deleted_count))
+    return 0
+
+
+def _handle_diskcheck(args, config, manager) -> int:
+    """执行磁盘空间检查"""
+    from sbackup.diskcheck import DiskChecker
+
+    source = parse_path(args.source)
+    target = parse_path(args.target)
+
+    if not os.path.isdir(source):
+        print(t("err.folder.invalid", path=source))
+        return 1
+
+    fmt = config.compression_format
+    level = args.level
+    checker = DiskChecker(source, target)
+    info = checker.check(fmt=fmt, compression_level=level)
+    report = checker.format_report(info, lang=config.lang)
+    print(report)
+    return 0 if info.enough else 1
+
+
 def _handle_completion(args, config, manager) -> int:
     """生成并输出 shell 自动补全脚本"""
     from sbackup.completion import generate
@@ -1518,6 +1818,7 @@ _COMMAND_HANDLERS: dict[str, callable] = {
     "history": _handle_list,
     "save": _handle_save,
     "watch": _handle_watch,
+    "compress": _handle_compress,
     "restore": _handle_restore,
     "info": _handle_info,
     "diff": _handle_diff,
@@ -1536,6 +1837,8 @@ _COMMAND_HANDLERS: dict[str, callable] = {
     "report": _handle_report,
     "search": _handle_search,
     "clean": _handle_clean,
+    "rotate": _handle_rotate,
+    "diskcheck": _handle_diskcheck,
     "completion": _handle_completion,
     "integrity": _handle_integrity,
     "task": _handle_task,
