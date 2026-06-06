@@ -212,6 +212,12 @@ def get_parser() -> argparse.ArgumentParser:
         default=None,
         help=t("cli.help.save.post_hook"),
     )
+    save_parser.add_argument(
+        "--threads",
+        type=int,
+        default=1,
+        help=t("cli.help.save.threads"),
+    )
 
     watch_parser = subparsers.add_parser("watch", help=t("cli.help.watch"))
     watch_parser.add_argument(
@@ -293,6 +299,12 @@ def get_parser() -> argparse.ArgumentParser:
         default=30,
         help=t("cli.help.watch.debounce"),
     )
+    watch_parser.add_argument(
+        "--threads",
+        type=int,
+        default=1,
+        help=t("cli.help.watch.threads"),
+    )
 
     restore_parser = subparsers.add_parser("restore", help=t("cli.help.restore"))
     restore_parser.add_argument(
@@ -324,6 +336,12 @@ def get_parser() -> argparse.ArgumentParser:
         "backup_file", nargs="?", default=None, help=t("cli.help.diff.file")
     )
     diff_parser.add_argument("--password", default="", help=t("cli.help.diff.password"))
+    diff_parser.add_argument(
+        "--detail",
+        action="store_true",
+        default=False,
+        help=t("cli.help.diff.detail"),
+    )
 
     verify_parser = subparsers.add_parser("verify", help=t("cli.help.verify"))
     verify_parser.add_argument(
@@ -749,6 +767,7 @@ def _handle_save(args, config, manager) -> int:
             pre_hooks=getattr(args, "pre_hook", None) or [],
             post_hooks=getattr(args, "post_hook", None) or [],
             dedup=args.dedup,
+            threads=args.threads,
         )
     finally:
         lock.release()
@@ -796,6 +815,7 @@ def _handle_watch(args, config, manager) -> int:
             pre_hooks=getattr(args, "pre_hook", None) or [],
             post_hooks=getattr(args, "post_hook", None) or [],
             dedup=args.dedup,
+            threads=args.threads,
         )
 
     try:
@@ -890,14 +910,32 @@ def _handle_info(args, config, manager) -> int:
 
 def _handle_diff(args, config, manager) -> int:
     source = parse_path(args.source)
-    diff_result = manager.diff_backup(source, args.backup_file, args.password)
+    diff_result = manager.diff_backup(
+        source, args.backup_file, args.password, detail=args.detail
+    )
     if not diff_result.get("success"):
         return 1
-    print(manager.format_diff(diff_result))
-    has_changes = (
-        diff_result["added"] or diff_result["removed"] or diff_result["modified"]
-    )
-    return 1 if has_changes else 0
+
+    if args.detail:
+        # 显示详细的行级差异
+        print(t("cmd.diff.detail_header"))
+        detail_map = diff_result.get("detail", {})
+        modified = diff_result.get("modified", [])
+        for f in modified:
+            if f in detail_map:
+                print(f"\n--- {f} ---")
+                print(detail_map[f])
+            else:
+                print(f"\n--- {f} ---")
+                print(t("cmd.diff.no_detail"))
+        has_changes = diff_result["added"] or diff_result["removed"] or modified
+        return 1 if has_changes else 0
+    else:
+        print(manager.format_diff(diff_result))
+        has_changes = (
+            diff_result["added"] or diff_result["removed"] or diff_result["modified"]
+        )
+        return 1 if has_changes else 0
 
 
 def _handle_verify(args, config, manager) -> int:

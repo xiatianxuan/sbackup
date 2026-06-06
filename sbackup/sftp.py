@@ -5,6 +5,7 @@ SFTP 远程备份模块：连接管理、文件上传、连接测试
 import os
 import logging
 from sbackup.i18n import t
+from sbackup.ratelimiter import RateLimiter
 
 logger = logging.getLogger(__name__)
 
@@ -204,13 +205,18 @@ class SFTPClient:
         return False
 
     def upload_file(
-        self, local_path: str, remote_path: str, progress_callback=None
+        self,
+        local_path: str,
+        remote_path: str,
+        progress_callback=None,
+        rate_limiter: RateLimiter | None = None,
     ) -> None:
         """
         上传单个文件到远程服务器
         :param local_path: 本地文件路径
         :param remote_path: 远程目标路径
         :param progress_callback: 进度回调函数 callback(bytes_transferred, total_bytes)
+        :param rate_limiter: 带宽限速器，None 表示不限速
         """
         if self._sftp is None:
             raise SFTPError(t("err.sftp.not_connected"))
@@ -220,20 +226,40 @@ class SFTPClient:
 
         filename = os.path.basename(local_path)
         remote_full = os.path.join(remote_path, filename).replace("\\", "/")
+        file_size = os.path.getsize(local_path)
 
         # 确保远程目录存在
         self._ensure_remote_dir(remote_path)
 
-        try:
-            self._sftp.put(
-                local_path,
-                remote_full,
-                callback=progress_callback,
-                confirm=True,
-            )
-            logger.debug("SFTP 上传成功: %s -> %s", local_path, remote_full)
-        except OSError as e:
-            raise SFTPError(t("err.sftp.upload", path=filename, error=str(e)))
+        if rate_limiter is not None:
+            # 有速率限制时，使用分块写入方式上传
+            try:
+                with open(local_path, "rb") as local_f:
+                    with self._sftp.open(remote_full, "wb") as remote_f:
+                        sent = 0
+                        while True:
+                            data = local_f.read(65536)  # 64KB 块
+                            if not data:
+                                break
+                            rate_limiter.wait(len(data))
+                            remote_f.write(data)
+                            sent += len(data)
+                            if progress_callback:
+                                progress_callback(sent, file_size)
+                logger.debug("SFTP 上传成功(限速): %s -> %s", local_path, remote_full)
+            except OSError as e:
+                raise SFTPError(t("err.sftp.upload", path=filename, error=str(e)))
+        else:
+            try:
+                self._sftp.put(
+                    local_path,
+                    remote_full,
+                    callback=progress_callback,
+                    confirm=True,
+                )
+                logger.debug("SFTP 上传成功: %s -> %s", local_path, remote_full)
+            except OSError as e:
+                raise SFTPError(t("err.sftp.upload", path=filename, error=str(e)))
 
     def _ensure_remote_dir(self, remote_path: str, max_depth: int = 50) -> None:
         """确保远程目录存在，不存在则逐级创建"""

@@ -12,8 +12,10 @@ import urllib.request
 import urllib.error
 import urllib.parse
 from base64 import b64encode
+from io import BytesIO
 
 from sbackup.i18n import t
+from sbackup.ratelimiter import RateLimiter
 
 logger = logging.getLogger(__name__)
 
@@ -145,11 +147,14 @@ class WebDAVClient:
         except OSError as e:
             raise WebDAVError(t("err.webdav.connect", url=self.url, error=str(e)))
 
-    def upload_file(self, local_path: str, remote_path: str) -> int:
+    def upload_file(
+        self, local_path: str, remote_path: str, rate_limiter: RateLimiter | None = None
+    ) -> int:
         """
         上传文件到 WebDAV 服务器
         :param local_path: 本地文件路径
         :param remote_path: 远程文件路径
+        :param rate_limiter: 带宽限速器，None 表示不限速
         :return: 上传的字节数
         """
         if not os.path.isfile(local_path):
@@ -165,13 +170,29 @@ class WebDAVClient:
         )
 
         try:
-            # 流式上传：不将整个文件读入内存
             url = self._build_url(remote_path)
-            with open(local_path, "rb") as f:
-                req = urllib.request.Request(url, data=f, method="PUT")
+            if rate_limiter is not None:
+                # 有限速时：分块读入 BytesIO，每块限速
+                buf = BytesIO()
+                with open(local_path, "rb") as f:
+                    while True:
+                        chunk = f.read(65536)  # 64KB
+                        if not chunk:
+                            break
+                        rate_limiter.wait(len(chunk))
+                        buf.write(chunk)
+                data = buf.getvalue()
+                req = urllib.request.Request(url, data=data, method="PUT")
                 req.add_header("Authorization", self._auth_header)
-                req.add_header("Content-Length", str(file_size))
+                req.add_header("Content-Length", str(len(data)))
                 urllib.request.urlopen(req, timeout=300)
+            else:
+                # 不限速时保持流式上传（不读入内存）
+                with open(local_path, "rb") as f:
+                    req = urllib.request.Request(url, data=f, method="PUT")
+                    req.add_header("Authorization", self._auth_header)
+                    req.add_header("Content-Length", str(file_size))
+                    urllib.request.urlopen(req, timeout=300)
             logger.debug("上传成功: %s", remote_path)
             return file_size
         except urllib.error.HTTPError as e:

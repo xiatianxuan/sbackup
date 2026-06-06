@@ -246,7 +246,11 @@ class BackupManager:
         return True
 
     def diff_backup(
-        self, source: str, backup_file: str | None = None, password: str = ""
+        self,
+        source: str,
+        backup_file: str | None = None,
+        password: str = "",
+        detail: bool = False,
     ) -> dict:
         """
         对比源目录与最近一次备份的差异
@@ -341,12 +345,33 @@ class BackupManager:
             except OSError:
                 pass
 
+        # 逐行差异详情
+        detail_map: dict[str, str] = {}
+        if detail and modified:
+            from sbackup.compression import get_diff_detail
+
+            for rel_path in modified:
+                src_file = (
+                    Path(abs_source) / rel_path.split("/", 1)[-1]
+                    if "/" in rel_path
+                    else Path(abs_source) / rel_path
+                )
+                diff_text = get_diff_detail(
+                    source_path=str(src_file),
+                    archive_path=target_backup,
+                    archive_member=rel_path,
+                    password=password,
+                )
+                if diff_text is not None:
+                    detail_map[rel_path] = diff_text
+
         return {
             "success": True,
             "backup_file": target_backup,
             "added": added,
             "removed": removed,
             "modified": modified,
+            "detail": detail_map,
         }
 
     def format_diff(self, diff_result: dict) -> str:
@@ -422,6 +447,7 @@ class BackupManager:
         pre_hooks: list[str] | None = None,
         post_hooks: list[str] | None = None,
         dedup: bool = False,
+        threads: int = 1,
     ):
         """
         执行所有备份策略
@@ -443,6 +469,7 @@ class BackupManager:
         :param pre_hooks: 备份前执行的命令列表
         :param post_hooks: 备份后执行的命令列表
         :param dedup: 启用跨策略 SHA256 内容哈希去重
+        :param threads: 并行压缩线程数（仅 ZIP 格式支持并行写入，默认 1=串行）
         """
         config = load_config()
         start_time = time.monotonic()
@@ -490,6 +517,7 @@ class BackupManager:
                         split_size,
                         incremental,
                         chunk_meta,
+                        threads,
                     )
                 )
             else:
@@ -535,6 +563,7 @@ class BackupManager:
                         _,
                         _,
                         incr_mode,
+                        _,
                         _,
                     ) = futures[future]
                     try:
@@ -595,6 +624,7 @@ class BackupManager:
                 split,
                 incr_mode,
                 chmeta,
+                threads_val,
             ) in tasks:
                 result = self._do_backup(
                     key,
@@ -611,6 +641,7 @@ class BackupManager:
                     split,
                     incr_mode,
                     chmeta,
+                    threads_val,
                 )
                 if result and result.get("success"):
                     entry.mtime = current_mtime
@@ -818,6 +849,7 @@ class BackupManager:
         split_size: int = 0,
         incremental: str | None = None,
         chunk_meta: dict | None = None,
+        threads: int = 1,
     ) -> dict:
         """执行单个备份策略（线程安全）"""
         fmt = entry.compression_format or config.compression_format
@@ -841,6 +873,7 @@ class BackupManager:
             min_size=min_size,
             max_age_seconds=max_age_seconds,
             file_metadata=file_metadata or {},
+            threads=threads,
         )
         result = create_compressor(config_instance).compress()
         # 非 7z 格式 + 有密码 → 全格式加密
@@ -2047,7 +2080,9 @@ class BackupManager:
         for source, raw in strategies.items():
             entry = BackupEntry.from_list(raw)
             fmt = entry.compression_format or t("table.cell.default")
-            skip_patterns = ", ".join(entry.skip_patterns) if entry.skip_patterns else "-"
+            skip_patterns = (
+                ", ".join(entry.skip_patterns) if entry.skip_patterns else "-"
+            )
             strategy_rows += f"""<tr>
             <td>{source}</td>
             <td>{entry.target}</td>

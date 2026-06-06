@@ -1,6 +1,10 @@
 """S3 兼容云存储客户端"""
 
 import logging
+import os
+from io import BytesIO
+
+from sbackup.ratelimiter import RateLimiter
 
 logger = logging.getLogger(__name__)
 
@@ -46,11 +50,27 @@ class CloudStorageClient:
         if not self._client.bucket_exists(self.bucket):
             self._client.make_bucket(self.bucket)
 
-    def upload_file(self, local_path: str, remote_path: str) -> None:
+    def upload_file(
+        self, local_path: str, remote_path: str, rate_limiter: RateLimiter | None = None
+    ) -> None:
         """上传文件到云存储"""
         if self._client is None:
             self.connect()
-        self._client.fput_object(self.bucket, remote_path, local_path)
+        if rate_limiter is not None:
+            # 有限速时：分块读入内存，每块限速
+            file_size = os.path.getsize(local_path)
+            buf = BytesIO()
+            with open(local_path, "rb") as f:
+                while True:
+                    chunk = f.read(65536)  # 64KB
+                    if not chunk:
+                        break
+                    rate_limiter.wait(len(chunk))
+                    buf.write(chunk)
+            buf.seek(0)
+            self._client.put_object(self.bucket, remote_path, buf, file_size)
+        else:
+            self._client.fput_object(self.bucket, remote_path, local_path)
 
     def download_file(self, remote_path: str, local_path: str) -> None:
         """从云存储下载文件"""

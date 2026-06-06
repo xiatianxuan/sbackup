@@ -6,7 +6,9 @@ import logging
 import os
 import tarfile
 import tempfile
+import threading
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 from fnmatch import fnmatch
@@ -219,6 +221,9 @@ class BaseCompressor:
         self.min_size: int = config.min_size
         self.max_age_seconds: float = config.max_age_seconds
         self.file_metadata: dict = config.file_metadata
+        self.include_patterns: list[str] = config.include_patterns
+        self.exclude_patterns: list[str] = config.exclude_patterns
+        self.threads: int = config.threads
         self.compression_level: int | None = None
 
     def _load_ignore_file(self, folder_path: Path) -> list[str]:
@@ -318,6 +323,19 @@ class BaseCompressor:
                             else filename
                         )
                         if self._should_ignore(file_rel, extra_patterns):
+                            continue
+                        # 文件类型包含/排除过滤（glob 模式匹配文件名和相对路径）
+                        if self.include_patterns and not any(
+                            fnmatch(file_rel, p)
+                            or fnmatch(os.path.basename(file_rel), p)
+                            for p in self.include_patterns
+                        ):
+                            continue
+                        if self.exclude_patterns and any(
+                            fnmatch(file_rel, p)
+                            or fnmatch(os.path.basename(file_rel), p)
+                            for p in self.exclude_patterns
+                        ):
                             continue
                         # 文件大小过滤
                         if self.max_size > 0 or self.min_size > 0:
@@ -452,24 +470,60 @@ class ZipfileCompression(BaseCompressor):
             if self.compression_level is not None:
                 zip_kwargs["compresslevel"] = self.compression_level
 
-            with zipfile.ZipFile(zipfile_path, **zip_kwargs) as zipf:
-                with tqdm(
-                    total=total_files,
-                    unit="files",
-                    desc="Compressing...",
-                ) as pbar:
-                    for dirpath, filename in files_to_compress:
-                        file_path = Path(dirpath) / filename
-                        arcname = str(
-                            folder_path.name / file_path.relative_to(folder_path)
-                        ).replace("\\", "/")
-                        pbar.set_description(filename)
-                        try:
-                            zipf.write(file_path, arcname)
+            # 并行读取：用线程池预读文件到内存，再顺序写入归档
+            if self.threads > 1 and files_to_compress:
+                file_data: list[tuple[str, bytes]] = []
+                lock = threading.Lock()
+
+                def _read_file(dirpath: str, filename: str) -> None:
+                    fpath = Path(dirpath) / filename
+                    arcname = str(
+                        folder_path.name / fpath.relative_to(folder_path)
+                    ).replace("\\", "/")
+                    try:
+                        data = fpath.read_bytes()
+                        with lock:
+                            file_data.append((arcname, data))
+                    except OSError:
+                        pass
+
+                with ThreadPoolExecutor(max_workers=self.threads) as ex:
+                    list(
+                        ex.map(
+                            lambda args: _read_file(*args),
+                            files_to_compress,
+                        )
+                    )
+
+                with zipfile.ZipFile(zipfile_path, **zip_kwargs) as zipf:
+                    with tqdm(
+                        total=len(file_data),
+                        unit="files",
+                        desc="Compressing...",
+                    ) as pbar:
+                        for arcname, data in file_data:
+                            zipf.writestr(arcname, data)
                             pbar.update(1)
                             files_count += 1
-                        except (FileNotFoundError, PermissionError):
-                            continue
+            else:
+                with zipfile.ZipFile(zipfile_path, **zip_kwargs) as zipf:
+                    with tqdm(
+                        total=total_files,
+                        unit="files",
+                        desc="Compressing...",
+                    ) as pbar:
+                        for dirpath, filename in files_to_compress:
+                            file_path = Path(dirpath) / filename
+                            arcname = str(
+                                folder_path.name / file_path.relative_to(folder_path)
+                            ).replace("\\", "/")
+                            pbar.set_description(filename)
+                            try:
+                                zipf.write(file_path, arcname)
+                                pbar.update(1)
+                                files_count += 1
+                            except (FileNotFoundError, PermissionError):
+                                continue
 
             size_mb = zipfile_path.stat().st_size / (1024 * 1024)
             original_mb = original_size / (1024 * 1024)

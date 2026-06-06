@@ -106,6 +106,11 @@ class Config:
     # 文件过滤（字节数，0 = 不限制）
     max_size: int = 0
     min_size: int = 0
+    # 文件类型包含/排除（glob 模式列表，fnmatch 匹配）
+    include_patterns: list[str] = field(default_factory=list)
+    exclude_patterns: list[str] = field(default_factory=list)
+    # 并行压缩线程数（仅 ZIP 格式支持并行写入，默认为 1=串行）
+    threads: int = 1
     # 文件年龄过滤（秒，0 = 不限制）
     max_age_seconds: float = 0
     # 增量备份：文件级元数据 {rel_path: [mtime, size]}
