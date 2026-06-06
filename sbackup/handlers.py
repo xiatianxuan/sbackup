@@ -546,7 +546,7 @@ After=network.target
 [Service]
 Type=oneshot
 ExecStart={sbackup_cmd} save
-User={args.user or os.environ.get('USER', 'root')}
+User={args.user or os.environ.get("USER", "root")}
 
 [Install]
 WantedBy=multi-user.target
@@ -568,17 +568,23 @@ WantedBy=timers.target
         print("# sbackup.timer:")
         print(timer_content)
         print("# To install:")
-        print(f"  cat > /etc/systemd/system/sbackup.service << 'EOF'")
+        print("  cat > /etc/systemd/system/sbackup.service << 'EOF'")
         print(service_content.replace("'", "'\\''"))
-        print(f"  EOF")
-        print(f"  cat > /etc/systemd/system/sbackup.timer << 'EOF'")
+        print("  EOF")
+        print("  cat > /etc/systemd/system/sbackup.timer << 'EOF'")
         print(timer_content.replace("'", "'\\''"))
-        print(f"  EOF")
-        print(f"  systemctl daemon-reload && systemctl enable --now sbackup.timer")
+        print("  EOF")
+        print("  systemctl daemon-reload && systemctl enable --now sbackup.timer")
 
     elif args.type == "schtasks":
         cmdline = f"{sbackup_cmd} save"
-        print(t("cmd.schedule.install.schtasks_cmd", interval=args.interval, cmdline=cmdline))
+        print(
+            t(
+                "cmd.schedule.install.schtasks_cmd",
+                interval=args.interval,
+                cmdline=cmdline,
+            )
+        )
 
     elif args.type == "launchd":
         plist = f"""<?xml version="1.0" encoding="UTF-8"?>
@@ -604,6 +610,8 @@ WantedBy=timers.target
         print()
         print(plist)
         print("# Save as ~/Library/LaunchAgents/com.sbackup.backup.plist")
-        print("# Then run: launchctl load ~/Library/LaunchAgents/com.sbackup.backup.plist")
+        print(
+            "# Then run: launchctl load ~/Library/LaunchAgents/com.sbackup.backup.plist"
+        )
 
     return 0

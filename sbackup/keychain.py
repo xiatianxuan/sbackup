@@ -22,10 +22,8 @@
 """
 
 import sys
-import os
 import subprocess
 import logging
-import json
 
 logger = logging.getLogger(__name__)
 
@@ -79,7 +77,6 @@ def is_available() -> bool:
     if sys.platform == "win32":
         # Windows Credential Manager 通常总是可用
         try:
-            import ctypes
             _win32_get_password("sbackup", "__probe__")
             return True
         except Exception:
@@ -88,7 +85,8 @@ def is_available() -> bool:
         try:
             subprocess.run(
                 ["security", "help"],
-                capture_output=True, timeout=5,
+                capture_output=True,
+                timeout=5,
             )
             return True
         except (FileNotFoundError, subprocess.TimeoutExpired):
@@ -97,7 +95,8 @@ def is_available() -> bool:
         try:
             subprocess.run(
                 ["secret-tool", "--help"],
-                capture_output=True, timeout=5,
+                capture_output=True,
+                timeout=5,
             )
             return True
         except (FileNotFoundError, subprocess.TimeoutExpired):
@@ -105,6 +104,7 @@ def is_available() -> bool:
 
 
 # ─── Windows ─────────────────────────────────────────────────────────
+
 
 def _win32_get_password(service: str, username: str) -> str | None:
     """使用 Win32 CredReadW API 读取凭据"""
@@ -200,12 +200,14 @@ def _win32_delete_password(service: str, username: str) -> bool:
 
 # ─── macOS ───────────────────────────────────────────────────────────
 
+
 def _darwin_get_password(service: str, username: str) -> str | None:
     """使用 macOS security CLI 读取钥匙串"""
     result = subprocess.run(
-        ["security", "find-generic-password",
-         "-s", service, "-a", username, "-w"],
-        capture_output=True, text=True, timeout=10,
+        ["security", "find-generic-password", "-s", service, "-a", username, "-w"],
+        capture_output=True,
+        text=True,
+        timeout=10,
     )
     if result.returncode == 0:
         return result.stdout.strip()
@@ -215,9 +217,20 @@ def _darwin_get_password(service: str, username: str) -> str | None:
 def _darwin_set_password(service: str, username: str, password: str) -> bool:
     """使用 macOS security CLI 存储到钥匙串"""
     result = subprocess.run(
-        ["security", "add-generic-password",
-         "-s", service, "-a", username, "-w", password, "-U"],
-        capture_output=True, text=True, timeout=10,
+        [
+            "security",
+            "add-generic-password",
+            "-s",
+            service,
+            "-a",
+            username,
+            "-w",
+            password,
+            "-U",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=10,
     )
     return result.returncode == 0
 
@@ -225,20 +238,24 @@ def _darwin_set_password(service: str, username: str, password: str) -> bool:
 def _darwin_delete_password(service: str, username: str) -> bool:
     """使用 macOS security CLI 从钥匙串删除"""
     result = subprocess.run(
-        ["security", "delete-generic-password",
-         "-s", service, "-a", username],
-        capture_output=True, text=True, timeout=10,
+        ["security", "delete-generic-password", "-s", service, "-a", username],
+        capture_output=True,
+        text=True,
+        timeout=10,
     )
     return result.returncode == 0
 
 
 # ─── Linux ───────────────────────────────────────────────────────────
 
+
 def _linux_get_password(service: str, username: str) -> str | None:
     """使用 secret-tool 读取密码"""
     result = subprocess.run(
         ["secret-tool", "lookup", "service", service, "username", username],
-        capture_output=True, text=True, timeout=10,
+        capture_output=True,
+        text=True,
+        timeout=10,
     )
     if result.returncode == 0:
         return result.stdout.strip()
@@ -248,10 +265,19 @@ def _linux_get_password(service: str, username: str) -> str | None:
 def _linux_set_password(service: str, username: str, password: str) -> bool:
     """使用 secret-tool 存储密码"""
     result = subprocess.run(
-        ["secret-tool", "store",
-         "--label", f"sbackup/{username}",
-         "service", service, "username", username],
-        input=password, text=True, timeout=10,
+        [
+            "secret-tool",
+            "store",
+            "--label",
+            f"sbackup/{username}",
+            "service",
+            service,
+            "username",
+            username,
+        ],
+        input=password,
+        text=True,
+        timeout=10,
     )
     return result.returncode == 0
 
@@ -260,6 +286,8 @@ def _linux_delete_password(service: str, username: str) -> bool:
     """使用 secret-tool 删除密码"""
     result = subprocess.run(
         ["secret-tool", "clear", "service", service, "username", username],
-        capture_output=True, text=True, timeout=10,
+        capture_output=True,
+        text=True,
+        timeout=10,
     )
     return result.returncode == 0

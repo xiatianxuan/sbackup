@@ -23,7 +23,6 @@
     sbackup completion powershell >> $PROFILE
 """
 
-
 # 所有子命令列表（与 cli.py 中的 _COMMAND_HANDLERS 保持同步）
 _SUBCOMMANDS = [
     "add",

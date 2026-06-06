@@ -888,3 +888,181 @@ class TestLockIntegration(unittest.TestCase):
         self.assertNotEqual(result, 0)
         mock_execute.assert_not_called()
         lock.release()
+
+
+class TestNewCliCommands(unittest.TestCase):
+    """测试新增的 CLI 功能：restore --tag, list --tags, schedule install"""
+
+    def setUp(self):
+        self.test_dir = tempfile.mkdtemp()
+        self.original_argv = sys.argv.copy()
+        self._root_handlers = logging.root.handlers[:]
+        self._root_level = logging.root.level
+        self.config_path = os.path.join(self.test_dir, "config.json")
+        self.data_path = os.path.join(self.test_dir, "sbackup.json")
+        with open(self.config_path, "w") as f:
+            json.dump({"data_file": self.data_path}, f)
+        # 创建带标签的历史记录
+        self.history = [
+            {
+                "time": "2026-01-01T12:00:00",
+                "source": "/test/src",
+                "size_mb": 1.0,
+                "files_count": 10,
+                "tag": "daily",
+                "path": "/test/backup_daily.zip",
+            },
+            {
+                "time": "2026-01-02T12:00:00",
+                "source": "/test/src",
+                "size_mb": 2.0,
+                "files_count": 20,
+                "tag": "weekly",
+                "path": "/test/backup_weekly.zip",
+            },
+            {
+                "time": "2026-01-03T12:00:00",
+                "source": "/test/src",
+                "size_mb": 3.0,
+                "files_count": 30,
+                "tag": "",
+                "path": "/test/backup_untagged.zip",
+            },
+        ]
+        self._init_data_file()
+
+    def _init_data_file(self):
+        with open(self.data_path, "w") as f:
+            json.dump({"_history": self.history}, f)
+
+    def tearDown(self):
+        sys.argv = self.original_argv
+        shutil.rmtree(self.test_dir, ignore_errors=True)
+        logging.root.handlers = self._root_handlers
+        logging.root.setLevel(self._root_level)
+
+    @patch("builtins.print")
+    def test_list_tags(self, mock_print):
+        """测试 list --tags 列出所有标签"""
+        os.chdir(self.test_dir)
+        sys.argv = ["sbackup", "--lang", "en_US", "list", "--tags"]
+        from sbackup import run
+
+        result = run()
+        self.assertEqual(result, 0)
+        printed = " ".join(str(c) for c in mock_print.call_args_list)
+        self.assertIn("daily", printed)
+        self.assertIn("weekly", printed)
+
+    @patch("builtins.print")
+    def test_list_tags_empty(self, mock_print):
+        """测试无标签时 list --tags 显示空提示"""
+        os.chdir(self.test_dir)
+        # 移除历史中的标签
+        for h in self.history:
+            h["tag"] = ""
+        self._init_data_file()
+        sys.argv = ["sbackup", "--lang", "en_US", "list", "--tags"]
+        from sbackup import run
+
+        result = run()
+        self.assertEqual(result, 0)
+
+    @patch("builtins.print")
+    def test_list_no_tags_flag(self, mock_print):
+        """测试 list 不加 --tags 显示历史表格"""
+        os.chdir(self.test_dir)
+        sys.argv = ["sbackup", "--lang", "en_US", "list"]
+        from sbackup import run
+
+        result = run()
+        self.assertEqual(result, 0)
+
+    @patch("builtins.print")
+    def test_restore_tag_not_found(self, mock_print):
+        """测试 restore --tag 标签不存在"""
+        os.chdir(self.test_dir)
+        sys.argv = ["sbackup", "--lang", "en_US", "restore", "--tag", "nonexistent"]
+        from sbackup import run
+
+        result = run()
+        self.assertEqual(result, 1)
+
+    @patch("builtins.print")
+    def test_versions_with_tag(self, mock_print):
+        """测试 versions --tag 按标签筛选"""
+        os.chdir(self.test_dir)
+        sys.argv = [
+            "sbackup",
+            "--lang",
+            "en_US",
+            "versions",
+            "--tag",
+            "daily",
+        ]
+        from sbackup import run
+
+        result = run()
+        self.assertEqual(result, 0)
+
+    @patch("builtins.print")
+    def test_schedule_install_systemd(self, mock_print):
+        """测试 schedule install --type systemd 输出安装命令"""
+        os.chdir(self.test_dir)
+        from sbackup import run
+
+        sys.argv = [
+            "sbackup",
+            "--lang",
+            "en_US",
+            "schedule",
+            "install",
+            "--type",
+            "systemd",
+            "--interval",
+            "120",
+        ]
+        result = run()
+        self.assertEqual(result, 0)
+        printed = " ".join(str(c) for c in mock_print.call_args_list)
+        self.assertIn("systemd", printed)
+
+    @patch("builtins.print")
+    def test_schedule_install_schtasks(self, mock_print):
+        """测试 schedule install --type schtasks 输出命令"""
+        os.chdir(self.test_dir)
+        from sbackup import run
+
+        sys.argv = [
+            "sbackup",
+            "--lang",
+            "en_US",
+            "schedule",
+            "install",
+            "--type",
+            "schtasks",
+        ]
+        result = run()
+        self.assertEqual(result, 0)
+        printed = " ".join(str(c) for c in mock_print.call_args_list)
+        self.assertIn("Administrator", printed)
+
+    @patch("builtins.print")
+    def test_schedule_install_launchd(self, mock_print):
+        """测试 schedule install --type launchd 输出 plist"""
+        os.chdir(self.test_dir)
+        from sbackup import run
+
+        sys.argv = [
+            "sbackup",
+            "--lang",
+            "en_US",
+            "schedule",
+            "install",
+            "--type",
+            "launchd",
+        ]
+        result = run()
+        self.assertEqual(result, 0)
+        printed = " ".join(str(c) for c in mock_print.call_args_list)
+        self.assertIn("plist", printed)

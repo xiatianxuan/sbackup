@@ -9,7 +9,6 @@
 import os
 import hashlib
 import struct
-import shutil
 import logging
 
 logger = logging.getLogger(__name__)

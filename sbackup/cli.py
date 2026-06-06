@@ -134,7 +134,9 @@ def get_parser() -> argparse.ArgumentParser:
 
     subparsers.add_parser("all", help=t("cli.help.all"))
 
-    list_parser = subparsers.add_parser("list", aliases=["history"], help=t("cli.help.list"))
+    list_parser = subparsers.add_parser(
+        "list", aliases=["history"], help=t("cli.help.list")
+    )
     list_parser.add_argument(
         "--tags", action="store_true", help=t("cli.help.list.tags")
     )
@@ -298,9 +300,7 @@ def get_parser() -> argparse.ArgumentParser:
         default="",
         help=t("cli.help.restore.select"),
     )
-    restore_parser.add_argument(
-        "--tag", default="", help=t("cli.help.restore.tag")
-    )
+    restore_parser.add_argument("--tag", default="", help=t("cli.help.restore.tag"))
 
     info_parser = subparsers.add_parser("info", help=t("cli.help.info"))
     info_parser.add_argument("backup_file", help=t("cli.help.info.file"))
@@ -468,9 +468,7 @@ def get_parser() -> argparse.ArgumentParser:
     versions_parser.add_argument(
         "source", nargs="?", default="", help=t("cli.help.versions.source")
     )
-    versions_parser.add_argument(
-        "--tag", default="", help=t("cli.help.versions.tag")
-    )
+    versions_parser.add_argument("--tag", default="", help=t("cli.help.versions.tag"))
 
     schedule_parser = subparsers.add_parser("schedule", help=t("cli.help.schedule"))
     schedule_sub = schedule_parser.add_subparsers(
@@ -505,11 +503,14 @@ def get_parser() -> argparse.ArgumentParser:
         help=t("cli.help.schedule.install.type"),
     )
     schedule_install.add_argument(
-        "--interval", type=int, default=60,
+        "--interval",
+        type=int,
+        default=60,
         help=t("cli.help.schedule.install.interval"),
     )
     schedule_install.add_argument(
-        "--user", default="",
+        "--user",
+        default="",
         help=t("cli.help.schedule.install.user"),
     )
 
