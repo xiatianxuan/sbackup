@@ -134,7 +134,10 @@ def get_parser() -> argparse.ArgumentParser:
 
     subparsers.add_parser("all", help=t("cli.help.all"))
 
-    subparsers.add_parser("list", aliases=["history"], help=t("cli.help.list"))
+    list_parser = subparsers.add_parser("list", aliases=["history"], help=t("cli.help.list"))
+    list_parser.add_argument(
+        "--tags", action="store_true", help=t("cli.help.list.tags")
+    )
 
     subparsers.add_parser("init", help=t("cli.help.init"))
 
@@ -278,8 +281,12 @@ def get_parser() -> argparse.ArgumentParser:
     )
 
     restore_parser = subparsers.add_parser("restore", help=t("cli.help.restore"))
-    restore_parser.add_argument("backup_file", help=t("cli.help.restore.file"))
-    restore_parser.add_argument("target_dir", help=t("cli.help.restore.dir"))
+    restore_parser.add_argument(
+        "backup_file", nargs="?", default="", help=t("cli.help.restore.file")
+    )
+    restore_parser.add_argument(
+        "target_dir", nargs="?", default="", help=t("cli.help.restore.dir")
+    )
     restore_parser.add_argument(
         "--password", default="", help=t("cli.help.restore.password")
     )
@@ -290,6 +297,9 @@ def get_parser() -> argparse.ArgumentParser:
         "--select",
         default="",
         help=t("cli.help.restore.select"),
+    )
+    restore_parser.add_argument(
+        "--tag", default="", help=t("cli.help.restore.tag")
     )
 
     info_parser = subparsers.add_parser("info", help=t("cli.help.info"))
@@ -457,6 +467,9 @@ def get_parser() -> argparse.ArgumentParser:
     versions_parser = subparsers.add_parser("versions", help=t("cli.help.versions"))
     versions_parser.add_argument(
         "source", nargs="?", default="", help=t("cli.help.versions.source")
+    )
+    versions_parser.add_argument(
+        "--tag", default="", help=t("cli.help.versions.tag")
     )
 
     schedule_parser = subparsers.add_parser("schedule", help=t("cli.help.schedule"))
@@ -658,6 +671,15 @@ def _handle_edit(args, config, manager) -> int:
 
 
 def _handle_list(args, config, manager) -> int:
+    if getattr(args, "tags", False):
+        tags = manager.get_tags()
+        if not tags:
+            print(t("cmd.list.tags.empty"))
+        else:
+            print(t("cmd.list.tags.header"))
+            for tag in sorted(tags):
+                print(f"  {tag}")
+        return 0
     print(manager.format_history_table())
     return 0
 
@@ -786,14 +808,35 @@ def _handle_watch(args, config, manager) -> int:
 
 
 def _handle_restore(args, config, manager) -> int:
+    tag = getattr(args, "tag", "") or ""
+    if tag:
+        entries = manager.get_history_by_tag(tag)
+        if not entries:
+            print(t("cmd.restore.tag_not_found", tag=tag))
+            return 1
+        backup_path = entries[-1].get("path", "")
+        if not backup_path or not os.path.isfile(backup_path):
+            print(t("cmd.restore.tag_not_found", tag=tag))
+            return 1
+        target_dir = args.backup_file or ""
+        if not target_dir:
+            print(t("cli.help.restore.dir"))
+            return 1
+    else:
+        backup_path = args.backup_file or ""
+        target_dir = args.target_dir or ""
+        if not backup_path or not target_dir:
+            parser = get_parser()
+            parser.print_help()
+            return 1
     if args.list:
         from sbackup.compression import list_backup_contents
 
-        print(list_backup_contents(args.backup_file, args.password))
+        print(list_backup_contents(backup_path, args.password))
         return 0
     result = restore_backup(
-        args.backup_file,
-        args.target_dir,
+        backup_path,
+        target_dir,
         args.password,
         select_pattern=getattr(args, "select", "") or "",
     )
@@ -1071,7 +1114,8 @@ def _handle_ignore(args, config, manager) -> int:
 
 def _handle_versions(args, config, manager) -> int:
     source = parse_path(args.source) if args.source else ""
-    print(manager.format_versions(source))
+    tag = getattr(args, "tag", "") or ""
+    print(manager.format_versions(source, tag=tag))
     return 0
 
 

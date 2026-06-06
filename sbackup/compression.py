@@ -455,14 +455,15 @@ class ZipfileCompression(BaseCompressor):
             with zipfile.ZipFile(zipfile_path, **zip_kwargs) as zipf:
                 with tqdm(
                     total=total_files,
-                    desc=t("compress.progress"),
-                    unit=t("compress.unit"),
+                    unit="files",
+                    desc="Compressing...",
                 ) as pbar:
                     for dirpath, filename in files_to_compress:
                         file_path = Path(dirpath) / filename
                         arcname = str(
                             folder_path.name / file_path.relative_to(folder_path)
                         ).replace("\\", "/")
+                        pbar.set_description(filename)
                         try:
                             zipf.write(file_path, arcname)
                             pbar.update(1)
@@ -564,14 +565,15 @@ class TarfileCompression(BaseCompressor):
             with tarfile.open(**tar_kwargs) as tarf:
                 with tqdm(
                     total=total_files,
-                    desc=t("compress.progress"),
-                    unit=t("compress.unit"),
+                    unit="files",
+                    desc="Compressing...",
                 ) as pbar:
                     for dirpath, filename in files_to_compress:
                         file_path = Path(dirpath) / filename
                         arcname = str(
                             folder_path.name / file_path.relative_to(folder_path)
                         ).replace("\\", "/")
+                        pbar.set_description(filename)
                         try:
                             tarf.add(file_path, arcname=arcname, recursive=False)
                             pbar.update(1)
@@ -665,14 +667,15 @@ class ZstdCompression(BaseCompressor):
                 with tarfile.open(fileobj=compressor, mode="w") as tarf:
                     with tqdm(
                         total=total_files,
-                        desc=t("compress.progress"),
-                        unit=t("compress.unit"),
+                        unit="files",
+                        desc="Compressing...",
                     ) as pbar:
                         for dirpath, filename in files_to_compress:
                             file_path = Path(dirpath) / filename
                             arcname = str(
                                 folder_path.name / file_path.relative_to(folder_path)
                             ).replace("\\", "/")
+                            pbar.set_description(filename)
                             try:
                                 tarf.add(file_path, arcname=arcname, recursive=False)
                                 pbar.update(1)
@@ -769,14 +772,15 @@ class SevenZipCompression(BaseCompressor):
             with py7zr.SevenZipFile(output_path, **szf_kwargs) as szf:
                 with tqdm(
                     total=total_files,
-                    desc=t("compress.progress"),
-                    unit=t("compress.unit"),
+                    unit="files",
+                    desc="Compressing...",
                 ) as pbar:
                     for dirpath, filename in files_to_compress:
                         file_path = Path(dirpath) / filename
                         arcname = str(
                             folder_path.name / file_path.relative_to(folder_path)
                         ).replace("\\", "/")
+                        pbar.set_description(filename)
                         try:
                             szf.write(file_path, arcname)
                             pbar.update(1)

@@ -363,8 +363,8 @@
     "err.webdav.not_found": "Remote file not found: {path}",
     "err.webdav.delete": "Failed to delete remote file {path}: {error}",
     "err.webdav.list": "Failed to list remote files {path}: {error}",
-    "restore.no_match": "No files matching \"{pattern}\"",
-    "cli.help.restore.select": "Selective restore: extract only files matching pattern (supports glob wildcards, e.g. \"*.py\" or \"src/main.py\")",
+    "restore.no_match": 'No files matching "{pattern}"',
+    "cli.help.restore.select": 'Selective restore: extract only files matching pattern (supports glob wildcards, e.g. "*.py" or "src/main.py")',
     "cli.help.schedule.type.schtasks": "Windows Task Scheduler",
     "cmd.schedule.schtasks.generated": "Windows Task Scheduler command generated",
     "cmd.hook.pre_running": "Running pre-backup hook: {command}",
@@ -384,5 +384,11 @@
     "log.monitor.trigger": "Debounce timeout, triggering backup ({dirty_count} dirs)",
     "log.monitor.source_missing": "Monitor source directory not found, skipping: {path}",
     "log.monitor.watching": "Now monitoring: {path}",
-    "log.monitor.no_sources": "No valid source directories to monitor, monitor not started"
+    "log.monitor.no_sources": "No valid source directories to monitor, monitor not started",
+    "cli.help.restore.tag": "Restore the backup with the specified tag",
+    "cli.help.list.tags": "List all backup tags",
+    "cli.help.versions.tag": "Filter versions by tag",
+    "cmd.restore.tag_not_found": "No backup found with tag '{tag}'",
+    "cmd.list.tags.header": "Backup Tags:",
+    "cmd.list.tags.empty": "No tags found"
 }

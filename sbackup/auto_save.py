@@ -447,7 +447,9 @@ class BackupManager:
 
         # 加载文件级/块级元数据（增量备份用）
         file_meta_all = self.data.get("_file_meta", {}) if incremental else {}
-        chunk_meta_all = self.data.get("_chunk_meta", {}) if incremental == "block" else {}
+        chunk_meta_all = (
+            self.data.get("_chunk_meta", {}) if incremental == "block" else {}
+        )
 
         # 收集需要备份的条目
         tasks = []
@@ -505,9 +507,22 @@ class BackupManager:
                     executor.submit(self._do_backup, *task): task for task in tasks
                 }
                 for future in as_completed(futures):
-                    key, entry, current_mtime, _, _, _, _, _, _, _, _, _, incr_mode, _ = futures[
-                        future
-                    ]
+                    (
+                        key,
+                        entry,
+                        current_mtime,
+                        _,
+                        _,
+                        _,
+                        _,
+                        _,
+                        _,
+                        _,
+                        _,
+                        _,
+                        incr_mode,
+                        _,
+                    ) = futures[future]
                     try:
                         result = future.result()
                     except Exception as e:
@@ -841,9 +856,9 @@ class BackupManager:
                     try:
                         if os.path.isfile(fp):
                             rel = os.path.relpath(fp, key).replace("\\", "/")
-                            self.data.setdefault("_chunk_meta", {}).setdefault(
-                                key, {}
-                            )[rel] = compute_chunk_hashes(fp)
+                            self.data.setdefault("_chunk_meta", {}).setdefault(key, {})[
+                                rel
+                            ] = compute_chunk_hashes(fp)
                     except OSError:
                         pass
         except OSError:
@@ -1284,7 +1299,7 @@ class BackupManager:
         backup_path: str = "",
         tag: str = "",
     ):
-        """记录备份历史（可选存储 SHA256 校验和和标签）"""
+        """记录备份历史（可选存储 SHA256 校验和、标签和备份文件路径）"""
         import hashlib
         from datetime import datetime
 
@@ -1297,6 +1312,8 @@ class BackupManager:
         }
         if tag:
             entry["tag"] = tag
+        if backup_path:
+            entry["path"] = backup_path
         if original_size_mb > 0:
             entry["original_size_mb"] = round(original_size_mb, 2)
             entry["ratio"] = (
@@ -1326,6 +1343,16 @@ class BackupManager:
         """获取备份历史记录"""
         return self.data.get(_HISTORY_KEY, [])
 
+    def get_history_by_tag(self, tag: str) -> list[dict]:
+        """根据标签筛选备份历史记录"""
+        history = self.get_history()
+        return [entry for entry in history if entry.get("tag", "") == tag]
+
+    def get_tags(self) -> set[str]:
+        """获取所有已使用的标签"""
+        history = self.get_history()
+        return {entry["tag"] for entry in history if entry.get("tag")}
+
     def find_checksum(self, backup_path: str) -> str:
         """从历史记录中查找备份文件的 SHA256 校验和
         :param backup_path: 备份文件路径
@@ -1346,9 +1373,10 @@ class BackupManager:
                 return sha
         return ""
 
-    def get_versions(self, source: str = "") -> dict[str, list[dict]]:
+    def get_versions(self, source: str = "", tag: str = "") -> dict[str, list[dict]]:
         """获取备份版本列表，按源目录分组
         :param source: 指定源目录路径，空字符串表示全部
+        :param tag: 按标签筛选，空字符串表示不筛选
         :return: {source_path: [version_entries]}
         """
         history = self.get_history()
@@ -1357,15 +1385,17 @@ class BackupManager:
             src = entry.get("source", "")
             if source and src != os.path.abspath(source):
                 continue
+            if tag and entry.get("tag", "") != tag:
+                continue
             versions.setdefault(src, []).append(entry)
         # 每个源的版本按时间倒序
         for src in versions:
             versions[src].sort(key=lambda e: e.get("time", ""), reverse=True)
         return versions
 
-    def format_versions(self, source: str = "") -> str:
+    def format_versions(self, source: str = "", tag: str = "") -> str:
         """格式化版本列表为可读文本"""
-        versions = self.get_versions(source)
+        versions = self.get_versions(source, tag)
         if not versions:
             return t("cmd.versions.empty")
 
@@ -1643,7 +1673,9 @@ class BackupManager:
 
         # 统计策略数
         strategies = {
-            k: v for k, v in self.data.items() if k not in (_HISTORY_KEY, "_file_meta", "_chunk_meta")
+            k: v
+            for k, v in self.data.items()
+            if k not in (_HISTORY_KEY, "_file_meta", "_chunk_meta")
         }
         lines.append(t("cmd.status.strategies", count=len(strategies)))
 
@@ -1795,7 +1827,9 @@ class BackupManager:
 
         # 策略统计
         strategies = {
-            k: v for k, v in self.data.items() if k not in (_HISTORY_KEY, "_file_meta", "_chunk_meta")
+            k: v
+            for k, v in self.data.items()
+            if k not in (_HISTORY_KEY, "_file_meta", "_chunk_meta")
         }
         lines.append("## 策略概览")
         lines.append(f"- 策略总数: {len(strategies)}")
