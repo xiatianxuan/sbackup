@@ -400,5 +400,7 @@
     "cli.help.versions.tag": "按标签筛选版本",
     "cmd.restore.tag_not_found": "未找到标签为 '{tag}' 的备份",
     "cmd.list.tags.header": "备份标签:",
-    "cmd.list.tags.empty": "暂无标签"
+    "cmd.list.tags.empty": "暂无标签",
+    "cli.help.dedup": "启用跨策略的基于内容哈希（SHA256）文件级去重",
+    "cmd.dedup.saved": "去重: 跳过 {count} 个重复文件，节省 {saved:.2f} MB"
 }

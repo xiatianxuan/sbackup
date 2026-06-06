@@ -83,6 +83,12 @@ def get_parser() -> argparse.ArgumentParser:
         help=t("cli.help.checksum"),
     )
     parser.add_argument(
+        "--dedup",
+        action="store_true",
+        default=False,
+        help=t("cli.help.dedup"),
+    )
+    parser.add_argument(
         "--format",
         default=None,
         choices=["zip", "tar", "tar.gz", "tar.bz2", "tar.xz", "tar.zst", "7z"],
@@ -158,6 +164,9 @@ def get_parser() -> argparse.ArgumentParser:
         "--webdav", action="store_true", default=False, help=t("cli.help.save.webdav")
     )
     save_parser.add_argument(
+        "--cloud", action="store_true", default=False, help=t("cli.help.save.cloud")
+    )
+    save_parser.add_argument(
         "--dry-run",
         action="store_true",
         default=False,
@@ -222,6 +231,9 @@ def get_parser() -> argparse.ArgumentParser:
     )
     watch_parser.add_argument(
         "--webdav", action="store_true", default=False, help=t("cli.help.watch.webdav")
+    )
+    watch_parser.add_argument(
+        "--cloud", action="store_true", default=False, help=t("cli.help.watch.cloud")
     )
     watch_parser.add_argument(
         "--dry-run",
@@ -719,6 +731,7 @@ def _handle_save(args, config, manager) -> int:
             password=args.password,
             sftp_upload=args.sftp,
             webdav_upload=args.webdav,
+            cloud_upload=args.cloud,
             dry_run=args.dry_run,
             verify=args.verify,
             name_template=args.name_template,
@@ -733,6 +746,7 @@ def _handle_save(args, config, manager) -> int:
             checksum=args.checksum,
             pre_hooks=getattr(args, "pre_hook", None) or [],
             post_hooks=getattr(args, "post_hook", None) or [],
+            dedup=args.dedup,
         )
     finally:
         lock.release()
@@ -764,6 +778,7 @@ def _handle_watch(args, config, manager) -> int:
             password=args.password,
             sftp_upload=args.sftp,
             webdav_upload=args.webdav,
+            cloud_upload=args.cloud,
             dry_run=args.dry_run,
             verify=args.verify,
             name_template=args.name_template,
@@ -778,6 +793,7 @@ def _handle_watch(args, config, manager) -> int:
             checksum=args.checksum,
             pre_hooks=getattr(args, "pre_hook", None) or [],
             post_hooks=getattr(args, "post_hook", None) or [],
+            dedup=args.dedup,
         )
 
     try:

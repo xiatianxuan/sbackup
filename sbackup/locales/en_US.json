@@ -397,5 +397,7 @@
     "cli.help.versions.tag": "Filter versions by tag",
     "cmd.restore.tag_not_found": "No backup found with tag '{tag}'",
     "cmd.list.tags.header": "Backup Tags:",
-    "cmd.list.tags.empty": "No tags found"
+    "cmd.list.tags.empty": "No tags found",
+    "cli.help.dedup": "Enable content-based deduplication across backup strategies (SHA256)",
+    "cmd.dedup.saved": "Deduplication: skipped {count} duplicate file(s), saved {saved:.2f} MB"
 }

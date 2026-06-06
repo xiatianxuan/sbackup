@@ -15,6 +15,7 @@ from sbackup.config import (
 )
 from sbackup.compression import create_compressor
 from sbackup.i18n import t
+from sbackup.retry import retry_call
 
 logger = logging.getLogger(__name__)
 
@@ -405,6 +406,7 @@ class BackupManager:
         password: str = "",
         sftp_upload: bool = False,
         webdav_upload: bool = False,
+        cloud_upload: bool = False,
         dry_run: bool = False,
         verify: bool = False,
         name_template: str | None = None,
@@ -419,6 +421,7 @@ class BackupManager:
         checksum: bool = False,
         pre_hooks: list[str] | None = None,
         post_hooks: list[str] | None = None,
+        dedup: bool = False,
     ):
         """
         执行所有备份策略
@@ -427,6 +430,7 @@ class BackupManager:
         :param password: 加密密码（仅 7z 格式支持）
         :param sftp_upload: 是否在备份后上传到 SFTP 服务器
         :param webdav_upload: 是否在备份后上传到 WebDAV 服务器
+        :param cloud_upload: 是否在备份后上传到 S3 兼容云存储
         :param dry_run: 仅预览将备份的文件，不实际执行
         :param verify: 备份后自动校验完整性
         :param name_template: 备份文件名模板（覆盖全局和条目级设置）
@@ -438,6 +442,7 @@ class BackupManager:
         :param incremental: 增量备份模式: None/""=全量, "file"=文件级, "block"=块级
         :param pre_hooks: 备份前执行的命令列表
         :param post_hooks: 备份后执行的命令列表
+        :param dedup: 启用跨策略 SHA256 内容哈希去重
         """
         config = load_config()
         start_time = time.monotonic()
@@ -495,6 +500,15 @@ class BackupManager:
             self._dry_run_preview(tasks, config)
             return
 
+        # 初始化去重存储
+        dedup_store = None
+        dedup_dup_count = 0
+        dedup_saved_size = 0
+        if dedup:
+            from sbackup.dedup import DedupStore
+
+            dedup_store = DedupStore(os.path.dirname(self.data_file))
+
         backup_count = 0
         verify_failures = 0
         uploaded_files = []
@@ -545,6 +559,17 @@ class BackupManager:
                             )
                         if incr_mode == "block":
                             self._update_chunk_meta(key)
+                        # 文件级去重：扫描源目录并注册文件哈希
+                        if dedup_store is not None:
+                            try:
+                                hash_counts = dedup_store.scan_directory(key)
+                                d_count, d_size = dedup_store.count_duplicates(
+                                    hash_counts
+                                )
+                                dedup_dup_count += d_count
+                                dedup_saved_size += d_size
+                            except OSError:
+                                pass
                         if keep > 0 or keep_days > 0:
                             self._cleanup_old_backups(entry.target, keep, keep_days)
                         backup_count += 1
@@ -604,6 +629,15 @@ class BackupManager:
                         )
                     if incr_mode == "block":
                         self._update_chunk_meta(key)
+                    # 文件级去重：扫描源目录并注册文件哈希
+                    if dedup_store is not None:
+                        try:
+                            hash_counts = dedup_store.scan_directory(key)
+                            d_count, d_size = dedup_store.count_duplicates(hash_counts)
+                            dedup_dup_count += d_count
+                            dedup_saved_size += d_size
+                        except OSError:
+                            pass
                     if keep > 0 or keep_days > 0:
                         self._cleanup_old_backups(entry.target, keep, keep_days)
                     backup_count += 1
@@ -638,20 +672,45 @@ class BackupManager:
         if verify_failures > 0:
             print(t("cmd.verify.partial_fail", count=verify_failures))
 
-        # 并行上传到 SFTP 和 WebDAV（使用 ThreadPoolExecutor）
+        # 去重统计
+        if dedup_store is not None and dedup_dup_count > 0:
+            print(
+                t(
+                    "cmd.dedup.saved",
+                    count=dedup_dup_count,
+                    saved=dedup_saved_size / (1024 * 1024),
+                )
+            )
+
+        # 并行上传到 SFTP、WebDAV 和云存储（使用 ThreadPoolExecutor）
         sftp_needed = sftp_upload and bool(uploaded_files)
         webdav_needed = webdav_upload and bool(uploaded_files)
+        cloud_needed = cloud_upload and bool(uploaded_files)
 
-        if sftp_needed and webdav_needed:
+        upload_services = sum([sftp_needed, webdav_needed, cloud_needed])
+        if upload_services > 1:
             print(t("cmd.upload.parallel"))
-            with ThreadPoolExecutor(max_workers=2) as upload_executor:
-                sftp_future = upload_executor.submit(
-                    self._upload_to_sftp, uploaded_files, config
-                )
-                webdav_future = upload_executor.submit(
-                    self._upload_to_webdav, uploaded_files, config
-                )
-                for f in as_completed([sftp_future, webdav_future]):
+            with ThreadPoolExecutor(max_workers=upload_services) as upload_executor:
+                futures = []
+                if sftp_needed:
+                    futures.append(
+                        upload_executor.submit(
+                            self._upload_to_sftp, uploaded_files, config
+                        )
+                    )
+                if webdav_needed:
+                    futures.append(
+                        upload_executor.submit(
+                            self._upload_to_webdav, uploaded_files, config
+                        )
+                    )
+                if cloud_needed:
+                    futures.append(
+                        upload_executor.submit(
+                            self._upload_to_cloud, uploaded_files, config
+                        )
+                    )
+                for f in as_completed(futures):
                     exc = f.exception()
                     if exc:
                         logger.error("Parallel upload error: %s", exc)
@@ -660,6 +719,8 @@ class BackupManager:
                 self._upload_to_sftp(uploaded_files, config)
             if webdav_needed:
                 self._upload_to_webdav(uploaded_files, config)
+            if cloud_needed:
+                self._upload_to_cloud(uploaded_files, config)
 
         # Webhook 通知（支持多个 URL、自定义模板、重试）
         all_webhook_urls = list(getattr(config, "webhook_urls", []))
@@ -960,6 +1021,7 @@ class BackupManager:
         """POST 备份结果到单个 webhook URL，支持自定义模板和重试"""
         import urllib.request
         import urllib.error
+        import random
         import time as _time
         from datetime import datetime
 
@@ -1043,9 +1105,10 @@ class BackupManager:
                 return
             except (urllib.error.URLError, OSError) as e:
                 if attempt < max_attempts - 1:
-                    wait = 2**attempt
+                    wait = min(2**attempt, 30.0)
+                    wait += random.uniform(0, wait * 0.3)
                     logger.debug(
-                        "Webhook 重试 %d/%d (%ds后): %s",
+                        "Webhook 重试 %d/%d (%.1fs后): %s",
                         attempt + 1,
                         max_attempts,
                         wait,
@@ -1182,21 +1245,27 @@ class BackupManager:
                 key_passphrase = ""
 
         def _upload_single(local_path: str) -> tuple[str, bool, str]:
-            """单文件上传（线程安全，每个线程独立连接）"""
+            """单文件上传（线程安全，每个线程独立连接，带重试）"""
             filename = os.path.basename(local_path)
             try:
-                with SFTPClient(
-                    config.sftp_host,
-                    config.sftp_port,
-                    config.sftp_user,
-                    password,
-                    key_file,
-                    key_passphrase,
-                ) as client:
-                    client.upload_file(local_path, config.sftp_remote_path)
+                retry_call(
+                    lambda: _do_upload(local_path, filename),
+                )
                 return filename, True, ""
             except SFTPError as e:
                 return filename, False, str(e)
+
+        def _do_upload(local_path: str, filename: str) -> None:
+            """实际执行 SFTP 上传（可被 retry_call 包裹）"""
+            with SFTPClient(
+                config.sftp_host,
+                config.sftp_port,
+                config.sftp_user,
+                password,
+                key_file,
+                key_passphrase,
+            ) as client:
+                client.upload_file(local_path, config.sftp_remote_path)
 
         if len(file_paths) == 1:
             # 单文件直接上传（带进度条）
@@ -1207,27 +1276,30 @@ class BackupManager:
             try:
                 from tqdm import tqdm as tqdm_cls
 
-                with SFTPClient(
-                    config.sftp_host,
-                    config.sftp_port,
-                    config.sftp_user,
-                    password,
-                    key_file,
-                    key_passphrase,
-                ) as client:
-                    with tqdm_cls(
-                        total=file_size,
-                        unit="B",
-                        unit_scale=True,
-                        desc=t("cmd.sftp.progress"),
-                    ) as pbar:
-                        client.upload_file(
-                            local_path,
-                            config.sftp_remote_path,
-                            progress_callback=lambda sent, total: pbar.update(
-                                sent - pbar.n
-                            ),
-                        )
+                def _do_sftp_upload():
+                    with SFTPClient(
+                        config.sftp_host,
+                        config.sftp_port,
+                        config.sftp_user,
+                        password,
+                        key_file,
+                        key_passphrase,
+                    ) as client:
+                        with tqdm_cls(
+                            total=file_size,
+                            unit="B",
+                            unit_scale=True,
+                            desc=t("cmd.sftp.progress"),
+                        ) as pbar:
+                            client.upload_file(
+                                local_path,
+                                config.sftp_remote_path,
+                                progress_callback=lambda sent, total: pbar.update(
+                                    sent - pbar.n
+                                ),
+                            )
+
+                retry_call(_do_sftp_upload)
                 print(t("cmd.sftp.success", file=filename))
             except SFTPError as e:
                 print(str(e))
@@ -1256,17 +1328,22 @@ class BackupManager:
         def _upload_single(local_path: str) -> tuple[str, bool, str]:
             filename = os.path.basename(local_path)
             try:
-                client = WebDAVClient(
-                    config.webdav_url,
-                    config.webdav_user,
-                    config.webdav_password,
-                )
-                client.connect()
-                remote_path = config.webdav_remote_path.rstrip("/") + "/" + filename
-                client.upload_file(local_path, remote_path)
+                retry_call(_do_webdav_upload, local_path)
                 return filename, True, ""
             except WebDAVError as e:
                 return filename, False, str(e)
+
+        def _do_webdav_upload(local_path: str) -> None:
+            """实际执行 WebDAV 上传（可被 retry_call 包裹）"""
+            filename = os.path.basename(local_path)
+            client = WebDAVClient(
+                config.webdav_url,
+                config.webdav_user,
+                config.webdav_password,
+            )
+            client.connect()
+            remote_path = config.webdav_remote_path.rstrip("/") + "/" + filename
+            client.upload_file(local_path, remote_path)
 
         if len(file_paths) <= 1:
             # 单文件直接上传
@@ -1287,6 +1364,66 @@ class BackupManager:
                     filename, success, error = future.result()
                     if success:
                         print(t("cmd.webdav.success", file=filename))
+                    else:
+                        print(error)
+
+    @staticmethod
+    def _upload_to_cloud(file_paths: list[str], config: Config) -> None:
+        """将备份文件上传到 S3 兼容云存储"""
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        from sbackup.cloud_storage import CloudStorageClient, CloudStorageError
+
+        cloud_config = getattr(config, "cloud", None) or {}
+        if not cloud_config or not cloud_config.get("enabled"):
+            print(t("err.cloud.not_configured"))
+            return
+
+        endpoint = cloud_config.get("endpoint", "")
+        access_key = cloud_config.get("access_key", "")
+        secret_key = cloud_config.get("secret_key", "")
+        bucket = cloud_config.get("bucket", "")
+        region = cloud_config.get("region", "")
+        secure = cloud_config.get("secure", True)
+        remote_path_prefix = cloud_config.get("remote_path", "/")
+
+        if not endpoint or not bucket:
+            print(t("err.cloud.not_configured"))
+            return
+
+        def _upload_single(local_path: str) -> tuple[str, bool, str]:
+            filename = os.path.basename(local_path)
+            try:
+                with CloudStorageClient(
+                    endpoint,
+                    access_key,
+                    secret_key,
+                    bucket,
+                    region=region,
+                    secure=secure,
+                ) as client:
+                    remote_path = remote_path_prefix.rstrip("/") + "/" + filename
+                    client.upload_file(local_path, remote_path.lstrip("/"))
+                return filename, True, ""
+            except (CloudStorageError, Exception) as e:
+                return filename, False, str(e)
+
+        if len(file_paths) <= 1:
+            for local_path in file_paths:
+                filename = os.path.basename(local_path)
+                print(t("cmd.cloud.uploading", file=filename))
+                _, success, error = _upload_single(local_path)
+                if success:
+                    print(t("cmd.cloud.success", file=filename))
+                else:
+                    print(error)
+        else:
+            print(t("cmd.cloud.parallel_upload", count=len(file_paths)))
+            with ThreadPoolExecutor(max_workers=min(len(file_paths), 4)) as executor:
+                futures = {executor.submit(_upload_single, fp): fp for fp in file_paths}
+                for future in as_completed(futures):
+                    filename, success, error = future.result()
+                    if success:
+                        print(t("cmd.cloud.success", file=filename))
                     else:
                         print(error)
 

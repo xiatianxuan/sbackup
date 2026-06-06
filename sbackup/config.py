@@ -125,6 +125,15 @@ class Config:
     webdav_password: str = ""
     webdav_remote_path: str = "/"
     webdav_enabled: bool = False
+    # S3 云存储配置
+    cloud_endpoint: str = ""
+    cloud_access_key: str = ""
+    cloud_secret_key: str = ""
+    cloud_bucket: str = ""
+    cloud_region: str = ""
+    cloud_secure: bool = True
+    cloud_remote_path: str = "/"
+    cloud_enabled: bool = False
     # SMTP 邮件通知配置
     smtp_host: str = ""
     smtp_port: int = 587
@@ -174,6 +183,7 @@ def load_config(config_file: str = "config.json") -> Config:
         if webhook_url_legacy and not webhook_urls:
             webhook_urls = [webhook_url_legacy]
     webdav_config = config_data.get("webdav", {})
+    cloud_config = config_data.get("cloud", {})
     smtp_config = config_data.get("smtp", {})
 
     # 验证端口范围（1-65535）
@@ -219,6 +229,14 @@ def load_config(config_file: str = "config.json") -> Config:
         webdav_password=webdav_config.get("password", ""),
         webdav_remote_path=webdav_config.get("remote_path", "/"),
         webdav_enabled=webdav_config.get("enabled", False),
+        cloud_endpoint=cloud_config.get("endpoint", ""),
+        cloud_access_key=cloud_config.get("access_key", ""),
+        cloud_secret_key=cloud_config.get("secret_key", ""),
+        cloud_bucket=cloud_config.get("bucket", ""),
+        cloud_region=cloud_config.get("region", ""),
+        cloud_secure=cloud_config.get("secure", True),
+        cloud_remote_path=cloud_config.get("remote_path", "/"),
+        cloud_enabled=cloud_config.get("enabled", False),
         smtp_host=smtp_config.get("host", ""),
         smtp_port=smtp_port,
         smtp_user=smtp_config.get("user", ""),
@@ -290,6 +308,32 @@ def save_webdav_config(
     _save_json_file(data, config_file)
 
 
+def save_cloud_config(
+    endpoint: str,
+    access_key: str,
+    secret_key: str,
+    bucket: str,
+    region: str = "",
+    secure: bool = True,
+    remote_path: str = "/",
+    enabled: bool = True,
+    config_file: str = "config.json",
+) -> None:
+    """将云存储配置保存到配置文件"""
+    data = _load_json_file(config_file)
+    data["cloud"] = {
+        "endpoint": endpoint,
+        "access_key": access_key,
+        "secret_key": secret_key,
+        "bucket": bucket,
+        "region": region,
+        "secure": secure,
+        "remote_path": remote_path,
+        "enabled": enabled,
+    }
+    _save_json_file(data, config_file)
+
+
 def generate_config_template(config_file: str = "config.json") -> None:
     """生成完整的 config.json 模板，包含所有配置项的默认值"""
     template = {
@@ -324,6 +368,16 @@ def generate_config_template(config_file: str = "config.json") -> None:
             "remote_path": "/",
             "enabled": False,
         },
+        "cloud": {
+            "endpoint": "",
+            "access_key": "",
+            "secret_key": "",
+            "bucket": "",
+            "region": "",
+            "secure": True,
+            "remote_path": "/",
+            "enabled": False,
+        },
     }
     _save_json_file(template, config_file)
 
@@ -335,6 +389,8 @@ _SENSITIVE_FIELDS = [
     ("sftp", "key_passphrase"),
     ("webdav", "password"),
     ("smtp", "password"),
+    ("cloud", "access_key"),
+    ("cloud", "secret_key"),
 ]
 
 
