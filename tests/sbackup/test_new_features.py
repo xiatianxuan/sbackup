@@ -208,7 +208,10 @@ class TestPrePostHooks(unittest.TestCase):
 
     def setUp(self):
         self.test_dir = tempfile.mkdtemp()
-        self.original_cwd = os.getcwd()
+        try:
+            self.original_cwd = os.getcwd()
+        except FileNotFoundError:
+            self.original_cwd = tempfile.gettempdir()
         os.chdir(self.test_dir)
         self.data_file = os.path.join(self.test_dir, "data.json")
         self.manager = BackupManager(self.data_file)

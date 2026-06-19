@@ -365,7 +365,7 @@ class TestMain(unittest.TestCase):
             old_cwd = os.getcwd()
             os.chdir(tmpdir)
             try:
-                self.assertEqual(os.getcwd(), tmpdir)
+                self.assertEqual(os.path.realpath(os.getcwd()), os.path.realpath(tmpdir))
                 self.assertFalse(os.path.exists("config.json"))
                 sys.argv = ["sbackup", "--lang", "en_US", "init"]
                 from sbackup import run
@@ -859,7 +859,10 @@ class TestLockIntegration(unittest.TestCase):
         self.original_argv = sys.argv.copy()
         self._root_handlers = logging.root.handlers[:]
         self._root_level = logging.root.level
-        self._orig_cwd = os.getcwd()
+        try:
+            self._orig_cwd = os.getcwd()
+        except FileNotFoundError:
+            self._orig_cwd = tempfile.gettempdir()
         self.data_path = os.path.join(self.test_dir, "sbackup.json")
         with open(os.path.join(self.test_dir, "config.json"), "w") as f:
             json.dump({"data_file": self.data_path}, f)
@@ -917,7 +920,10 @@ class TestNewCliCommands(unittest.TestCase):
         self.original_argv = sys.argv.copy()
         self._root_handlers = logging.root.handlers[:]
         self._root_level = logging.root.level
-        self._orig_cwd = os.getcwd()
+        try:
+            self._orig_cwd = os.getcwd()
+        except FileNotFoundError:
+            self._orig_cwd = tempfile.gettempdir()
         self.config_path = os.path.join(self.test_dir, "config.json")
         self.data_path = os.path.join(self.test_dir, "sbackup.json")
         with open(self.config_path, "w") as f:
