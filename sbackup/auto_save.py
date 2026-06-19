@@ -624,7 +624,7 @@ class BackupManager:
                         if keep > 0 or keep_days > 0:
                             self._cleanup_old_backups(entry.target, keep, keep_days)
                         backup_count += 1
-                        if sftp_upload and result.get("path"):
+                        if (sftp_upload or webdav_upload or cloud_upload) and result.get("path"):
                             uploaded_files.append(result["path"])
                         if verify and result.get("path"):
                             if not self._verify_single(result["path"], password):
@@ -732,7 +732,7 @@ class BackupManager:
                     if keep > 0 or keep_days > 0:
                         self._cleanup_old_backups(entry.target, keep, keep_days)
                     backup_count += 1
-                    if sftp_upload and result.get("path"):
+                    if (sftp_upload or webdav_upload or cloud_upload) and result.get("path"):
                         uploaded_files.append(result["path"])
                     if verify and result.get("path"):
                         if not self._verify_single(result["path"], password):

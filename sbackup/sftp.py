@@ -53,6 +53,7 @@ class SFTPClient:
 
         try:
             self._transport = paramiko.Transport((self.host, self.port))
+            self._transport.start_client()
 
             # 主机密钥验证：加载系统 known_hosts
             host_keys = paramiko.HostKeys()
@@ -73,7 +74,13 @@ class SFTPClient:
                 if remote_key is None:
                     self.disconnect()
                     raise SFTPError(t("err.sftp.no_host_key", host=self.host))
-                host_key_entry = host_keys.lookup(self.host)
+                # 非标准端口使用 [host]:port 格式查找
+                host_lookup = (
+                    f"[{self.host}]:{self.port}"
+                    if self.port != 22
+                    else self.host
+                )
+                host_key_entry = host_keys.lookup(host_lookup)
                 if host_key_entry is None:
                     # 主机不在已知列表中，警告但允许连接（首次连接）
                     logger.warning(
@@ -81,7 +88,7 @@ class SFTPClient:
                     )
                 else:
                     try:
-                        host_keys.check(self.host, remote_key)
+                        host_keys.check(host_lookup, remote_key)
                     except paramiko.SSHException:
                         self.disconnect()
                         raise SFTPError(t("err.sftp.host_key_mismatch", host=self.host))
@@ -94,10 +101,16 @@ class SFTPClient:
                     t("warn.sftp.no_known_hosts", host=self.host),
                     file=sys.stderr,
                 )
+
+            # 记录是否为首次连接（用于后续保存主机密钥）
+            first_connection = (
+                host_keys and host_keys.lookup(host_lookup) is None
+            ) if host_keys else False
+
             if key_file_expanded and os.path.isfile(key_file_expanded):
                 # 私钥认证
                 pkey = self._load_private_key(key_file_expanded, self.key_passphrase)
-                self._transport.connect(username=self.user, pkey=pkey)
+                self._transport.auth_publickey(self.user, pkey)
                 logger.debug(
                     "SFTP 私钥连接成功: %s@%s:%d (key=%s)",
                     self.user,
@@ -107,10 +120,24 @@ class SFTPClient:
                 )
             else:
                 # 密码认证
-                self._transport.connect(username=self.user, password=self.password)
+                self._transport.auth_password(self.user, self.password)
                 logger.debug(
                     "SFTP 密码连接成功: %s@%s:%d", self.user, self.host, self.port
                 )
+
+            # 首次连接成功后，保存主机密钥到 known_hosts
+            if first_connection:
+                try:
+                    remote_key = self._transport.get_remote_server_key()
+                    if remote_key:
+                        host_keys.add(host_lookup, remote_key.get_name(), remote_key)
+                        known_hosts_file = os.path.expanduser("~/.ssh/known_hosts")
+                        os.makedirs(os.path.dirname(known_hosts_file), exist_ok=True)
+                        host_keys.save(known_hosts_file)
+                        logger.debug("SFTP: 已保存主机密钥到 %s", known_hosts_file)
+                except Exception as e:
+                    logger.debug("SFTP: 保存主机密钥失败: %s", e)
+
             self._sftp = paramiko.SFTPClient.from_transport(self._transport)
         except paramiko.AuthenticationException:
             self.disconnect()

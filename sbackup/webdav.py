@@ -64,9 +64,16 @@ class WebDAVClient:
                 pass
 
         self.url = url.rstrip("/")
+        # 保留原始 URL 的尾部斜杠（某些服务器要求）
+        if url.endswith("/") and not self.url.endswith("/"):
+            self.url += "/"
         self.user = user
         self.password = password
         self._auth_header = self._make_auth()
+        # 支持 PROPFIND 等非标准方法的重定向
+        redirect_handler = urllib.request.HTTPRedirectHandler()
+        redirect_handler.redirect_request = self._redirect_request
+        self._opener = urllib.request.build_opener(redirect_handler)
 
     def _make_auth(self) -> str:
         """生成 Basic Auth 头"""
@@ -74,11 +81,24 @@ class WebDAVClient:
         encoded = b64encode(credentials.encode("utf-8")).decode("utf-8")
         return f"Basic {encoded}"
 
+    def _redirect_request(self, req, fp, code, msg, headers, newurl):
+        """处理重定向，保留原始请求方法和认证头"""
+        new_req = urllib.request.Request(
+            newurl,
+            method=req.get_method(),
+            data=req.data,
+            headers={
+                k: v for k, v in req.header_items()
+                if k.lower() not in ("host", "content-length")
+            },
+        )
+        return new_req
+
     def _build_url(self, path: str = "") -> str:
         """构建完整 URL"""
         path = path.strip("/")
         if path:
-            return f"{self.url}/{path}"
+            return f"{self.url.rstrip('/')}/{path}"
         return self.url
 
     def _build_request(
@@ -90,8 +110,9 @@ class WebDAVClient:
     ) -> urllib.request.Request:
         """构建 HTTP 请求对象"""
         url = self._build_url(path)
-        req = urllib.request.Request(url, method=method)
+        req = urllib.request.Request(url, data=data, method=method)
         req.add_header("Authorization", self._auth_header)
+        req.add_header("User-Agent", "sbackup/1.0")
         if data is not None:
             req.add_header("Content-Length", str(len(data)))
         if content_type:
@@ -108,7 +129,7 @@ class WebDAVClient:
             current = f"{current}/{part}" if current else part
             try:
                 req = self._build_request("MKCOL", current)
-                urllib.request.urlopen(req, timeout=30)
+                self._opener.open(req, timeout=30)
                 logger.debug("创建远程目录: %s", current)
             except urllib.error.HTTPError as e:
                 if e.code == 405:
@@ -131,7 +152,7 @@ class WebDAVClient:
                 content_type="application/xml",
             )
             req.add_header("Depth", "0")
-            resp = urllib.request.urlopen(req, timeout=15)
+            resp = self._opener.open(req, timeout=15)
 
             # XML 炸弹防护：限制响应大小
             MAX_CONNECT_XML_SIZE = 1 * 1024 * 1024  # 1MB
@@ -185,14 +206,14 @@ class WebDAVClient:
                 req = urllib.request.Request(url, data=data, method="PUT")
                 req.add_header("Authorization", self._auth_header)
                 req.add_header("Content-Length", str(len(data)))
-                urllib.request.urlopen(req, timeout=300)
+                self._opener.open(req, timeout=300)
             else:
                 # 不限速时保持流式上传（不读入内存）
                 with open(local_path, "rb") as f:
                     req = urllib.request.Request(url, data=f, method="PUT")
                     req.add_header("Authorization", self._auth_header)
                     req.add_header("Content-Length", str(file_size))
-                    urllib.request.urlopen(req, timeout=300)
+                    self._opener.open(req, timeout=300)
             logger.debug("上传成功: %s", remote_path)
             return file_size
         except urllib.error.HTTPError as e:
@@ -223,7 +244,7 @@ class WebDAVClient:
                 content_type="application/xml",
             )
             req.add_header("Depth", "1")
-            resp = urllib.request.urlopen(req, timeout=30)
+            resp = self._opener.open(req, timeout=30)
             xml_data = resp.read()
         except urllib.error.HTTPError as e:
             if e.code == 401:
@@ -273,7 +294,7 @@ class WebDAVClient:
         """删除远程文件（DELETE）"""
         try:
             req = self._build_request("DELETE", remote_path)
-            urllib.request.urlopen(req, timeout=30)
+            self._opener.open(req, timeout=30)
             logger.debug("WebDAV 删除文件: %s", remote_path)
         except urllib.error.HTTPError as e:
             if e.code == 401:

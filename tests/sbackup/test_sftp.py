@@ -17,6 +17,22 @@ class TestSFTPClient(unittest.TestCase):
         self.password = "testpass"
         self.key_file = "/path/to/id_rsa"
         self.key_passphrase = "keypass"
+        # 使用临时目录避免污染真实的 known_hosts 文件
+        self._tmp_dir = tempfile.mkdtemp()
+        self._orig_expanduser = os.path.expanduser
+
+        def _mock_expanduser(path):
+            if path == "~/.ssh/known_hosts":
+                return os.path.join(self._tmp_dir, "known_hosts")
+            return self._orig_expanduser(path)
+
+        self._expanduser_patcher = patch("os.path.expanduser", side_effect=_mock_expanduser)
+        self._expanduser_patcher.start()
+
+    def tearDown(self):
+        self._expanduser_patcher.stop()
+        import shutil
+        shutil.rmtree(self._tmp_dir, ignore_errors=True)
 
     def test_init_stores_credentials(self):
         """测试初始化存储凭据"""
@@ -41,8 +57,8 @@ class TestSFTPClient(unittest.TestCase):
         client.connect()
 
         mock_transport_cls.assert_called_once_with((self.host, self.port))
-        mock_transport.connect.assert_called_once_with(
-            username=self.user, password=self.password
+        mock_transport.auth_password.assert_called_once_with(
+            self.user, self.password
         )
         mock_sftp_cls.from_transport.assert_called_once_with(mock_transport)
 
@@ -52,7 +68,7 @@ class TestSFTPClient(unittest.TestCase):
         import paramiko
 
         mock_transport = MagicMock()
-        mock_transport.connect.side_effect = paramiko.AuthenticationException()
+        mock_transport.auth_password.side_effect = paramiko.AuthenticationException()
         mock_transport_cls.return_value = mock_transport
 
         client = SFTPClient(self.host, self.port, self.user, self.password)
@@ -66,7 +82,7 @@ class TestSFTPClient(unittest.TestCase):
         import paramiko
 
         mock_transport = MagicMock()
-        mock_transport.connect.side_effect = paramiko.SSHException("Connection refused")
+        mock_transport.auth_password.side_effect = paramiko.SSHException("Connection refused")
         mock_transport_cls.return_value = mock_transport
 
         client = SFTPClient(self.host, self.port, self.user, self.password)
@@ -266,7 +282,7 @@ class TestSFTPClient(unittest.TestCase):
         import paramiko
 
         mock_transport = MagicMock()
-        mock_transport.connect.side_effect = paramiko.AuthenticationException()
+        mock_transport.auth_password.side_effect = paramiko.AuthenticationException()
         mock_transport_cls.return_value = mock_transport
 
         client = SFTPClient(self.host, self.port, self.user, self.password)
@@ -409,8 +425,8 @@ class TestSFTPClient(unittest.TestCase):
             any(self.key_file in c for c in expanduser_calls),
             f"expanduser should be called with key_file, got: {expanduser_calls}",
         )
-        mock_transport.connect.assert_called_once_with(
-            username=self.user, pkey=mock_pkey
+        mock_transport.auth_publickey.assert_called_once_with(
+            self.user, mock_pkey
         )
 
     @patch("paramiko.Transport")
@@ -464,8 +480,8 @@ class TestSFTPClient(unittest.TestCase):
         )
         client.connect()
 
-        mock_transport.connect.assert_called_once_with(
-            username=self.user, password=self.password
+        mock_transport.auth_password.assert_called_once_with(
+            self.user, self.password
         )
 
     @patch("paramiko.RSAKey")
@@ -638,8 +654,8 @@ class TestSFTPClient(unittest.TestCase):
         mock_rsa.from_private_key_file.assert_called_once_with(
             "/home/user/.ssh/id_rsa", password="correct_passphrase"
         )
-        mock_transport.connect.assert_called_once_with(
-            username=self.user, pkey=mock_pkey
+        mock_transport.auth_publickey.assert_called_once_with(
+            self.user, mock_pkey
         )
 
     # ========== 资源清理测试 ==========
@@ -671,7 +687,7 @@ class TestSFTPClient(unittest.TestCase):
 
         mock_transport = MagicMock()
         mock_transport_cls.return_value = mock_transport
-        mock_transport.connect.side_effect = paramiko.AuthenticationException(
+        mock_transport.auth_password.side_effect = paramiko.AuthenticationException(
             "auth failed"
         )
 
@@ -728,6 +744,114 @@ class TestSFTPClient(unittest.TestCase):
         client.delete_remote_file("/backups/backup1.zip")
 
         mock_sftp.remove.assert_called_once_with("/backups/backup1.zip")
+
+
+class TestResolveSFTPAuth(unittest.TestCase):
+    """测试 _resolve_sftp_auth 函数的认证凭据解析逻辑"""
+
+    @patch("sbackup.sftp.SFTPClient.resolve_key_passphrase")
+    @patch("sbackup.sftp.SFTPClient.try_default_key")
+    def test_password_fallback_true_with_no_passphrase(self, mock_try_key, mock_resolve):
+        """allow_password_fallback=True 时，用户放弃密码短语应回退到密码认证"""
+        mock_try_key.return_value = None  # 无默认密钥
+        mock_resolve.return_value = None
+
+        from sbackup.handlers import _resolve_sftp_auth
+
+        with patch("getpass.getpass", return_value="mypassword"):
+            key_file, passphrase, password = _resolve_sftp_auth(
+                "/path/to/key", "", "", interactive=True, allow_password_fallback=True
+            )
+
+        self.assertEqual(key_file, "")
+        self.assertEqual(passphrase, "")
+        self.assertEqual(password, "mypassword")
+
+    @patch("sbackup.sftp.SFTPClient.resolve_key_passphrase")
+    def test_password_fallback_false_with_no_passphrase(self, mock_resolve):
+        """allow_password_fallback=False 时，用户放弃密码短语应返回私钥路径"""
+        mock_resolve.return_value = None
+
+        from sbackup.handlers import _resolve_sftp_auth
+
+        key_file, passphrase, password = _resolve_sftp_auth(
+            "/path/to/key", "", "", interactive=True, allow_password_fallback=False
+        )
+
+        self.assertEqual(key_file, "/path/to/key")
+        self.assertEqual(passphrase, "")
+        self.assertEqual(password, "")
+
+    @patch("sbackup.sftp.SFTPClient.resolve_key_passphrase")
+    def test_password_fallback_false_with_passphrase(self, mock_resolve):
+        """allow_password_fallback=False 时，有密码短语应正常返回私钥凭据"""
+        mock_resolve.return_value = "keypass"
+
+        from sbackup.handlers import _resolve_sftp_auth
+
+        key_file, passphrase, password = _resolve_sftp_auth(
+            "/path/to/key", "", "", interactive=True, allow_password_fallback=False
+        )
+
+        self.assertEqual(key_file, "/path/to/key")
+        self.assertEqual(passphrase, "keypass")
+        self.assertEqual(password, "")
+
+    @patch("sbackup.sftp.SFTPClient.try_default_key")
+    def test_password_fallback_false_no_key_no_default(self, mock_try_key):
+        """allow_password_fallback=False 时，无密钥无默认密钥应提示输入密码"""
+        mock_try_key.return_value = None
+
+        from sbackup.handlers import _resolve_sftp_auth
+
+        with patch("getpass.getpass", return_value="fallbackpw"):
+            key_file, passphrase, password = _resolve_sftp_auth(
+                "", "", "", interactive=True, allow_password_fallback=False
+            )
+
+        self.assertEqual(key_file, "")
+        self.assertEqual(passphrase, "")
+        self.assertEqual(password, "fallbackpw")
+
+    def test_explicit_key_and_passphrase(self):
+        """已有完整私钥凭据时直接返回"""
+        from sbackup.handlers import _resolve_sftp_auth
+
+        key_file, passphrase, password = _resolve_sftp_auth(
+            "/path/to/key", "keypass", "", interactive=False
+        )
+
+        self.assertEqual(key_file, "/path/to/key")
+        self.assertEqual(passphrase, "keypass")
+        self.assertEqual(password, "")
+
+    def test_explicit_password(self):
+        """已有密码时直接返回"""
+        from sbackup.handlers import _resolve_sftp_auth
+
+        key_file, passphrase, password = _resolve_sftp_auth(
+            "", "", "mypassword", interactive=False
+        )
+
+        self.assertEqual(key_file, "")
+        self.assertEqual(passphrase, "")
+        self.assertEqual(password, "mypassword")
+
+    @patch("sbackup.sftp.SFTPClient.try_default_key")
+    def test_default_fallback_true_no_key_no_default_interactive(self, mock_try_key):
+        """allow_password_fallback=True 默认值，无密钥无默认密钥应提示输入密码"""
+        mock_try_key.return_value = None
+
+        from sbackup.handlers import _resolve_sftp_auth
+
+        with patch("getpass.getpass", return_value="auto_pw"):
+            key_file, passphrase, password = _resolve_sftp_auth(
+                "", "", "", interactive=True
+            )
+
+        self.assertEqual(key_file, "")
+        self.assertEqual(passphrase, "")
+        self.assertEqual(password, "auto_pw")
 
 
 if __name__ == "__main__":

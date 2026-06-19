@@ -28,7 +28,7 @@ class TestWebDAVClient(unittest.TestCase):
 
     def test_build_url(self):
         """测试 URL 构建"""
-        self.assertEqual(self.client._build_url(), "https://dav.jianguoyun.com/dav")
+        self.assertEqual(self.client._build_url(), "https://dav.jianguoyun.com/dav/")
         self.assertEqual(
             self.client._build_url("backups"), "https://dav.jianguoyun.com/dav/backups"
         )
@@ -42,37 +42,36 @@ class TestWebDAVClient(unittest.TestCase):
         auth = self.client._make_auth()
         self.assertTrue(auth.startswith("Basic "))
 
-    @patch("urllib.request.urlopen")
-    def test_connect_success(self, mock_urlopen):
+    def test_connect_success(self):
         """测试连接成功"""
-        mock_urlopen.return_value = MagicMock()
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b"<D:multistatus/>"
+        self.client._opener.open = MagicMock(return_value=mock_resp)
         self.client.connect()
-        mock_urlopen.assert_called_once()
+        self.client._opener.open.assert_called_once()
 
-    @patch("urllib.request.urlopen")
-    def test_connect_auth_failure(self, mock_urlopen):
+    def test_connect_auth_failure(self):
         """测试连接认证失败"""
         import urllib.error
 
-        mock_urlopen.side_effect = urllib.error.HTTPError(
+        self.client._opener.open = MagicMock(side_effect=urllib.error.HTTPError(
             self.url, 401, "Unauthorized", {}, None
-        )
+        ))
         with self.assertRaises(WebDAVError) as ctx:
             self.client.connect()
         self.assertIn("认证", str(ctx.exception))
 
-    @patch("urllib.request.urlopen")
-    def test_connect_network_error(self, mock_urlopen):
+    def test_connect_network_error(self):
         """测试连接网络错误"""
-        mock_urlopen.side_effect = OSError("Connection refused")
+        self.client._opener.open = MagicMock(side_effect=OSError("Connection refused"))
         with self.assertRaises(WebDAVError):
             self.client.connect()
 
-    @patch("urllib.request.urlopen")
-    def test_upload_file_success(self, mock_urlopen):
+    def test_upload_file_success(self):
         """测试文件上传成功"""
-        mock_urlopen.return_value = MagicMock()
-        mock_urlopen.return_value.read.return_value = b""
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b""
+        self.client._opener.open = MagicMock(return_value=mock_resp)
         size = self.client.upload_file(self.test_file, "backups/test.txt")
         self.assertEqual(size, os.path.getsize(self.test_file))
 
@@ -82,118 +81,110 @@ class TestWebDAVClient(unittest.TestCase):
             self.client.upload_file("/nonexistent/file.txt", "remote.txt")
         self.assertIn("不存在", str(ctx.exception))
 
-    @patch("urllib.request.urlopen")
-    def test_upload_file_http_error(self, mock_urlopen):
+    def test_upload_file_http_error(self):
         """测试上传 HTTP 错误"""
         import urllib.error
 
-        mock_urlopen.side_effect = urllib.error.HTTPError(
+        self.client._opener.open = MagicMock(side_effect=urllib.error.HTTPError(
             self.url, 500, "Server Error", {}, None
-        )
+        ))
         with self.assertRaises(WebDAVError) as ctx:
             self.client.upload_file(self.test_file, "remote.txt")
         self.assertIn("失败", str(ctx.exception))
 
-    @patch("urllib.request.urlopen")
-    def test_ensure_remote_dir_creates(self, mock_urlopen):
+    def test_ensure_remote_dir_creates(self):
         """测试递归创建远程目录"""
-        mock_urlopen.return_value = MagicMock()
+        mock_resp = MagicMock()
+        self.client._opener.open = MagicMock(return_value=mock_resp)
         self.client._ensure_remote_dir("a/b/c")
         # 应该调用 3 次 MKCOL
-        self.assertEqual(mock_urlopen.call_count, 3)
+        self.assertEqual(self.client._opener.open.call_count, 3)
 
-    @patch("urllib.request.urlopen")
-    def test_ensure_remote_dir_exists(self, mock_urlopen):
+    def test_ensure_remote_dir_exists(self):
         """测试目录已存在（405）"""
         import urllib.error
 
-        mock_urlopen.side_effect = urllib.error.HTTPError(
+        self.client._opener.open = MagicMock(side_effect=urllib.error.HTTPError(
             self.url, 405, "Method Not Allowed", {}, None
-        )
+        ))
         self.client._ensure_remote_dir("existing")  # 不应抛出异常
 
-    @patch("urllib.request.urlopen")
-    def test_ensure_remote_dir_empty(self, mock_urlopen):
+    def test_ensure_remote_dir_empty(self):
         """测试空路径不操作"""
+        self.client._opener.open = MagicMock()
         self.client._ensure_remote_dir("")
-        mock_urlopen.assert_not_called()
+        self.client._opener.open.assert_not_called()
 
-    @patch("urllib.request.urlopen")
-    def test_test_connection_success(self, mock_urlopen):
+    def test_test_connection_success(self):
         """测试连接测试成功"""
-        mock_urlopen.return_value = MagicMock()
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b"<D:multistatus/>"
+        self.client._opener.open = MagicMock(return_value=mock_resp)
         result = self.client.test_connection()
         self.assertTrue(result)
 
-    @patch("urllib.request.urlopen")
-    def test_test_connection_failure(self, mock_urlopen):
+    def test_test_connection_failure(self):
         """测试连接测试失败"""
-        mock_urlopen.side_effect = OSError("timeout")
+        self.client._opener.open = MagicMock(side_effect=OSError("timeout"))
         result = self.client.test_connection()
         self.assertFalse(result)
 
-    @patch("urllib.request.urlopen")
-    def test_ensure_remote_dir_401(self, mock_urlopen):
+    def test_ensure_remote_dir_401(self):
         """测试 MKCOL 认证失败"""
         import urllib.error
 
-        mock_urlopen.side_effect = urllib.error.HTTPError(
+        self.client._opener.open = MagicMock(side_effect=urllib.error.HTTPError(
             self.url, 401, "Unauthorized", {}, None
-        )
+        ))
         with self.assertRaises(WebDAVError) as ctx:
             self.client._ensure_remote_dir("secret")
         self.assertIn("认证", str(ctx.exception))
 
-    @patch("urllib.request.urlopen")
-    def test_ensure_remote_dir_other_error(self, mock_urlopen):
+    def test_ensure_remote_dir_other_error(self):
         """测试 MKCOL 其他 HTTP 错误"""
         import urllib.error
 
-        mock_urlopen.side_effect = urllib.error.HTTPError(
+        self.client._opener.open = MagicMock(side_effect=urllib.error.HTTPError(
             self.url, 500, "Server Error", {}, None
-        )
+        ))
         with self.assertRaises(WebDAVError):
             self.client._ensure_remote_dir("bad_dir")
 
-    @patch("urllib.request.urlopen")
-    def test_ensure_remote_dir_os_error(self, mock_urlopen):
+    def test_ensure_remote_dir_os_error(self):
         """测试 MKCOL 网络错误"""
-        mock_urlopen.side_effect = OSError("Connection refused")
+        self.client._opener.open = MagicMock(side_effect=OSError("Connection refused"))
         with self.assertRaises(WebDAVError):
             self.client._ensure_remote_dir("offline_dir")
 
-    @patch("urllib.request.urlopen")
-    def test_upload_file_401(self, mock_urlopen):
+    def test_upload_file_401(self):
         """测试上传时认证失败"""
         import urllib.error
 
-        mock_urlopen.side_effect = urllib.error.HTTPError(
+        self.client._opener.open = MagicMock(side_effect=urllib.error.HTTPError(
             self.url, 401, "Unauthorized", {}, None
-        )
+        ))
         with self.assertRaises(WebDAVError) as ctx:
             self.client.upload_file(self.test_file, "backups/test.txt")
         self.assertIn("认证", str(ctx.exception))
 
-    @patch("urllib.request.urlopen")
-    def test_upload_file_os_error(self, mock_urlopen):
+    def test_upload_file_os_error(self):
         """测试上传时网络错误"""
         # 首次调用 (_ensure_remote_dir 的 MKCOL) 成功，第二次 (PUT) 失败
-        mock_urlopen.side_effect = [
+        self.client._opener.open = MagicMock(side_effect=[
             MagicMock(),  # MKCOL 成功
             OSError("Network unreachable"),  # PUT 失败
-        ]
+        ])
         with self.assertRaises(WebDAVError) as ctx:
             self.client.upload_file(self.test_file, "backups/test.txt")
         self.assertIn("backups/test.txt", str(ctx.exception))
 
-    @patch("urllib.request.urlopen")
-    def test_connect_non_auth_http_error(self, mock_urlopen):
+    def test_connect_non_auth_http_error(self):
         """测试连接时非认证 HTTP 错误"""
         import urllib.error
 
-        mock_urlopen.side_effect = urllib.error.HTTPError(
+        self.client._opener.open = MagicMock(side_effect=urllib.error.HTTPError(
             self.url, 502, "Bad Gateway", {}, None
-        )
+        ))
         with self.assertRaises(WebDAVError):
             self.client.connect()
 
@@ -215,8 +206,7 @@ class TestWebDAVClient(unittest.TestCase):
         self.assertEqual(req.get_method(), "PUT")
         self.assertEqual(req.full_url, "https://dav.jianguoyun.com/dav/upload.txt")
 
-    @patch("urllib.request.urlopen")
-    def test_list_remote_files(self, mock_urlopen):
+    def test_list_remote_files(self):
         """测试列出远程文件"""
         # 模拟 PROPFIND XML 响应
         xml_response = """<?xml version="1.0" encoding="utf-8"?>
@@ -239,19 +229,19 @@ class TestWebDAVClient(unittest.TestCase):
 </D:multistatus>"""
         mock_resp = MagicMock()
         mock_resp.read.return_value = xml_response.encode("utf-8")
-        mock_urlopen.return_value = mock_resp
+        self.client._opener.open = MagicMock(return_value=mock_resp)
 
         result = self.client.list_remote_files("backups")
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0]["name"], "backup1.zip")
         self.assertEqual(result[0]["size"], 1024)
 
-    @patch("urllib.request.urlopen")
-    def test_delete_remote_file(self, mock_urlopen):
+    def test_delete_remote_file(self):
         """测试删除远程文件"""
-        mock_urlopen.return_value = MagicMock()
+        mock_resp = MagicMock()
+        self.client._opener.open = MagicMock(return_value=mock_resp)
         self.client.delete_remote_file("backups/backup1.zip")
-        mock_urlopen.assert_called_once()
+        self.client._opener.open.assert_called_once()
 
 
 if __name__ == "__main__":

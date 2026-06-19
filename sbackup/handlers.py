@@ -40,17 +40,20 @@ def _resolve_sftp_auth(
     password: str,
     *,
     interactive: bool = False,
+    allow_password_fallback: bool = True,
 ) -> tuple[str, str, str]:
     """
     解析 SFTP 认证凭据，返回 (key_file, key_passphrase, password)。
 
     优先使用私钥认证，自动检测默认密钥，必要时交互式提示输入密码短语。
-    用户放弃输入密码短语时回退到密码认证。
+    用户放弃输入密码短语时，若 allow_password_fallback=True 则回退到密码认证，
+    否则直接返回私钥路径（连接时再提示密码短语）。
 
     :param key_file: 私钥文件路径（空字符串表示未指定）
     :param key_passphrase: 私钥密码短语（空字符串表示未指定）
     :param password: 密码（空字符串表示未指定）
     :param interactive: 是否在缺少密码时交互式提示输入
+    :param allow_password_fallback: 是否允许在密码短语缺失时回退到密码认证
     """
     from sbackup.sftp import SFTPClient
 
@@ -79,10 +82,13 @@ def _resolve_sftp_auth(
     # 检测私钥是否需要密码短语
     resolved = SFTPClient.resolve_key_passphrase(effective_key)
     if resolved is None:
-        # 用户放弃输入密码短语，回退到密码认证
-        if interactive and not password:
-            password = getpass.getpass(t("cli.prompt.sftp.password") + " ")
-        return "", "", password
+        if allow_password_fallback:
+            # 用户放弃输入密码短语，回退到密码认证
+            if interactive and not password:
+                password = getpass.getpass(t("cli.prompt.sftp.password") + " ")
+            return "", "", password
+        # 不回退密码，返回私钥路径（使用时再提示密码短语）
+        return effective_key, "", ""
 
     return effective_key, resolved, ""
 
@@ -128,6 +134,7 @@ def handle_sftp(args, config) -> int:
             args.key_passphrase or "",
             args.password or "",
             interactive=True,
+            allow_password_fallback=False,
         )
 
         remote_path = (
