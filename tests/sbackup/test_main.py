@@ -23,6 +23,8 @@ class TestMain(unittest.TestCase):
         # 保存 i18n 状态
         self._orig_locale = _current_locale
         self._orig_trans = _translations.copy()
+        # 保存当前工作目录
+        self._orig_cwd = os.getcwd()
         # 创建 config.json 指向测试目录的数据文件
         self.data_path = os.path.join(self.test_dir, "sbackup.json")
         with open(os.path.join(self.test_dir, "config.json"), "w") as f:
@@ -33,6 +35,11 @@ class TestMain(unittest.TestCase):
 
     def tearDown(self):
         sys.argv = self.original_argv
+        # 恢复工作目录（先于 rmtree，避免 cwd 被删除）
+        try:
+            os.chdir(self._orig_cwd)
+        except OSError:
+            pass
         shutil.rmtree(self.test_dir, ignore_errors=True)
         logging.root.handlers = self._root_handlers
         logging.root.setLevel(self._root_level)
@@ -852,6 +859,7 @@ class TestLockIntegration(unittest.TestCase):
         self.original_argv = sys.argv.copy()
         self._root_handlers = logging.root.handlers[:]
         self._root_level = logging.root.level
+        self._orig_cwd = os.getcwd()
         self.data_path = os.path.join(self.test_dir, "sbackup.json")
         with open(os.path.join(self.test_dir, "config.json"), "w") as f:
             json.dump({"data_file": self.data_path}, f)
@@ -860,6 +868,10 @@ class TestLockIntegration(unittest.TestCase):
 
     def tearDown(self):
         sys.argv = self.original_argv
+        try:
+            os.chdir(self._orig_cwd)
+        except OSError:
+            pass
         shutil.rmtree(self.test_dir, ignore_errors=True)
         logging.root.handlers = self._root_handlers
         logging.root.setLevel(self._root_level)
@@ -905,6 +917,7 @@ class TestNewCliCommands(unittest.TestCase):
         self.original_argv = sys.argv.copy()
         self._root_handlers = logging.root.handlers[:]
         self._root_level = logging.root.level
+        self._orig_cwd = os.getcwd()
         self.config_path = os.path.join(self.test_dir, "config.json")
         self.data_path = os.path.join(self.test_dir, "sbackup.json")
         with open(self.config_path, "w") as f:
@@ -944,6 +957,10 @@ class TestNewCliCommands(unittest.TestCase):
 
     def tearDown(self):
         sys.argv = self.original_argv
+        try:
+            os.chdir(self._orig_cwd)
+        except OSError:
+            pass
         shutil.rmtree(self.test_dir, ignore_errors=True)
         logging.root.handlers = self._root_handlers
         logging.root.setLevel(self._root_level)

@@ -440,8 +440,11 @@ class ZipfileCompression(BaseCompressor):
         if self.zipfile_path is None:
             return folder_path.parent / f"{base_name}.zip"
         zipfile_path = self.zipfile_path.resolve()
-        if zipfile_path.is_dir():
-            return zipfile_path / f"{base_name}.zip"
+        try:
+            if zipfile_path.is_dir():
+                return zipfile_path / f"{base_name}.zip"
+        except PermissionError:
+            pass
         if zipfile_path.suffix.lower() != ".zip":
             return zipfile_path.with_name(zipfile_path.name + ".zip")
         return zipfile_path
@@ -581,8 +584,11 @@ class TarfileCompression(BaseCompressor):
         if self.zipfile_path is None:
             return folder_path.parent / f"{base_name}{self._extension}"
         tarfile_path = self.zipfile_path.resolve()
-        if tarfile_path.is_dir():
-            return tarfile_path / f"{base_name}{self._extension}"
+        try:
+            if tarfile_path.is_dir():
+                return tarfile_path / f"{base_name}{self._extension}"
+        except PermissionError:
+            pass
         # 如果已有后缀，直接使用；否则追加
         name = tarfile_path.name
         if not any(
@@ -687,8 +693,11 @@ class ZstdCompression(BaseCompressor):
         if self.zipfile_path is None:
             return folder_path.parent / f"{base_name}.tar.zst"
         path = self.zipfile_path.resolve()
-        if path.is_dir():
-            return path / f"{base_name}.tar.zst"
+        try:
+            if path.is_dir():
+                return path / f"{base_name}.tar.zst"
+        except PermissionError:
+            pass
         if not path.name.endswith(".tar.zst"):
             return path.with_name(path.name + ".tar.zst")
         return path
@@ -791,8 +800,11 @@ class SevenZipCompression(BaseCompressor):
         if self.zipfile_path is None:
             return folder_path.parent / f"{base_name}.7z"
         path = self.zipfile_path.resolve()
-        if path.is_dir():
-            return path / f"{base_name}.7z"
+        try:
+            if path.is_dir():
+                return path / f"{base_name}.7z"
+        except PermissionError:
+            pass
         if path.suffix.lower() != ".7z":
             return path.with_name(path.name + ".7z")
         return path

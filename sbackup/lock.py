@@ -58,12 +58,15 @@ class BackupLock:
                 f.flush()
                 os.fsync(f.fileno())
 
-            # 原子 rename（Windows 上目标存在时失败）
-            os.rename(self._staging_path, self._lock_path)
-
-            self._locked = True
-            atexit.register(self.release)
-            return True
+            # 原子链接：如果目标已存在则失败（跨平台）
+            try:
+                os.link(self._staging_path, self._lock_path)
+                self._locked = True
+                atexit.register(self.release)
+                return True
+            except FileExistsError:
+                self._cleanup_staging()
+                return False
 
         except OSError:
             self._cleanup_staging()
