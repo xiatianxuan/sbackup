@@ -1,73 +1,79 @@
-# Sbackup: 智能文件夹备份工具
+# Sbackup
 
-一个轻量、高效的文件夹备份工具，支持命令行操作，帮助你轻松管理备份策略。
+[![Python](https://img.shields.io/badge/Python-3.10+-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![License](https://img.shields.io/badge/License-GPL--3.0-green)](LICENSE)
+[![PyPI](https://img.shields.io/pypi/v/sbackup-cli?color=blue)](https://pypi.org/project/sbackup-cli/)
+[![Tests](https://img.shields.io/badge/tests-940%20passed-brightgreen)](.github/workflows/ci.yml)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)]()
 
-## 📖 目录
+> A lightweight, efficient folder backup tool with CLI support for managing backup strategies.
 
-- [简介](#简介)
-- [功能特性](#功能特性)
-- [快速开始](#快速开始)
-  - [安装](#安装)
-  - [使用方法](#使用方法)
-- [配置文件](#配置文件)
-  - [配置示例](#配置示例)
-- [SFTP 远程备份](#sftp-远程备份)
-- [WebDAV 远程备份](#webdav-远程备份)
-- [实现原理](#实现原理)
-- [开发指南](#开发指南)
-  - [运行测试](#运行测试)
-  - [代码结构](#代码结构)
-- [常见问题](#常见问题)
-- [贡献指南](#贡献指南)
-- [许可证](#许可证)
-- [作者](#作者)
+[English](README.md) | [Deutsch](docs/readme/README_de.md) | [Espanol](docs/readme/README_es.md) | [Francais](docs/readme/README_fr.md) | [Portugues](docs/readme/README_pt.md) | [Pycckuu](docs/readme/README_ru.md) | [日本語](docs/readme/README_ja.md) | [한국어](docs/readme/README_ko.md) | [中文](docs/readme/README_zh.md)
+
+- [Introduction](#introduction)
+- [Features](#features)
+- [Getting Started](#getting-started)
+  - [Installation](#installation)
+  - [Usage](#usage)
+- [Configuration](#configuration)
+  - [Example Configuration](#example-configuration)
+- [SFTP Remote Backup](#sftp-remote-backup)
+- [WebDAV Remote Backup](#webdav-remote-backup)
+- [How It Works](#how-it-works)
+- [Development Guide](#development-guide)
+  - [Running Tests](#running-tests)
+  - [Code Structure](#code-structure)
+- [FAQ](#faq)
+- [Contributing](#contributing)
+- [License](#license)
+- [Author](#author)
 
 ---
 
-## 简介
+## Introduction
 
-Sbackup 是一个轻量级的文件夹备份工具，支持通过命令行添加、删除和查看备份策略。它基于文件夹的最后修改时间来决定是否需要进行备份，确保你的数据始终保持最新状态。
+Sbackup is a lightweight folder backup tool that lets you add, remove, and manage backup strategies from the command line. It uses each folder's last-modified timestamp to determine whether a backup is needed, keeping your data up to date.
 
-## 功能特性
+## Features
 
-- ✅ **增量备份**：仅备份已更改的文件夹，节省时间和存储空间
-- ✅ **多格式支持**：支持 ZIP、tar、tar.gz、tar.bz2、tar.xz、tar.zst、7z 七种打包格式，全局和条目级均可独立指定
-- ✅ **SFTP 远程备份**：基于 paramiko 库，支持密码/SSH 私钥认证、自动检测默认私钥
-- ✅ **WebDAV 远程备份**：基于标准库 urllib，零额外依赖，支持坚果云/NextCloud/群晖
-- ✅ **S3 云存储**：基于 minio 库，支持所有 S3 兼容存储（AWS/MinIO/阿里云 OSS 等）
-- ✅ **多目标并行备份**：同时备份到本地 + 多个远程目标，互不影响
-- ✅ **备份还原**：支持从备份文件解压还原到指定目录，支持选择性恢复
-- ✅ **备份清理**：自动删除旧备份，支持按数量/时间/每日保留策略
-- ✅ **加密备份**：支持 7z 格式密码加密 + 全格式 PBKDF2 加密
-- ✅ **定时备份**：设置间隔自动执行，支持实时文件监控（watchdog）
-- ✅ **备份历史**：记录每次备份的时间、大小、SHA256 校验和，方便追溯
-- ✅ **审计日志**：记录所有备份/恢复操作的审计事件
-- ✅ **Pre/Post Hook**：备份前后执行自定义命令
-- ✅ **配置 Profile**：支持多配置方案的保存、切换、导入导出
-- ✅ **跨档案搜索**：在多个备份文件中搜索匹配的文件名
-- ✅ **数据完整性**：SHA256 校验和生成与验证，Reed-Solomon 纠错码
-- ✅ **配置校验**：自动校验配置参数合法性，检测篡改
-- ✅ **任务队列**：管理备份任务队列，支持添加、执行、取消
-- ✅ **压缩基准测试**：比较不同格式/级别的压缩性能
-- ✅ **磁盘空间预估**：按文件类型估算备份大小，检查目标空间
-- ✅ **国际化**：支持中文、英语、法语、西班牙语、俄语、德语、日语、葡萄牙语、韩语九种语言
-- ✅ **Shell 补全**：支持 bash/zsh/fish/powershell 自动补全
-- ✅ **轻量高效**：体积小，启动速度快，资源占用低
-- ✅ **跨平台支持**：支持 Windows、macOS 和 Linux
+- **Incremental backup** -- only folders that have changed are backed up, saving time and storage
+- **Multi-format support** -- ZIP, tar, tar.gz, tar.bz2, tar.xz, tar.zst, 7z; both global and per-entry format overrides
+- **SFTP remote backup** -- built on paramiko with password/SSH key authentication and auto-detection of default keys
+- **WebDAV remote backup** -- uses Python's standard library urllib with zero extra dependencies; works with Jianguoyun, NextCloud, and Synology
+- **S3 cloud storage** -- powered by minio, supports all S3-compatible backends (AWS, MinIO, Alibaba Cloud OSS, etc.)
+- **Multi-destination parallel backup** -- back up to local and multiple remote targets simultaneously
+- **Restore** -- extract backups to a target directory with optional selective recovery
+- **Backup cleanup** -- automatically delete old backups by count, age, or daily retention policy
+- **Encrypted backup** -- 7z password encryption plus PBKDF2 encryption for all formats
+- **Scheduled backup** -- run backups on a fixed interval or monitor the filesystem in real time with watchdog
+- **Backup history** -- timestamps, file sizes, and SHA256 checksums recorded for every backup
+- **Audit log** -- audit events for all backup and restore operations
+- **Pre/Post hooks** -- run custom commands before or after backups
+- **Configuration profiles** -- save, switch, import, and export multiple configuration profiles
+- **Cross-archive search** -- search for matching filenames across multiple backup archives
+- **Data integrity** -- SHA256 checksum generation and verification, Reed-Solomon error correction codes
+- **Config validation** -- automatic validation of configuration parameters with tamper detection
+- **Task queue** -- manage backup tasks with add, execute, and cancel operations
+- **Compression benchmark** -- compare compression performance across formats and levels
+- **Disk space estimation** -- estimate backup size by file type and check destination space
+- **Internationalization** -- nine languages: Chinese, English, French, Spanish, Russian, German, Japanese, Portuguese, Korean
+- **Shell completion** -- auto-completion for bash, zsh, fish, and PowerShell
+- **Lightweight and efficient** -- small footprint, fast startup, low resource usage
+- **Cross-platform** -- Windows, macOS, and Linux
 
-## 快速开始
+## Getting Started
 
-### 安装
+### Installation
 
-#### 使用 pip 安装
+#### Install with pip
 
 ```bash
 pip install sbackup-cli
 ```
 
-安装后使用 `sbackup` 命令（PyPI 包名为 `sbackup-cli`，CLI 命令为 `sbackup`）。
+After installation, use the `sbackup` command (PyPI package name is `sbackup-cli`, CLI command is `sbackup`).
 
-#### 从源码安装
+#### Install from source
 
 ```bash
 git clone https://github.com/xiatianxuan/sbackup.git
@@ -75,281 +81,281 @@ cd sbackup
 uv sync
 ```
 
-### 使用方法
+### Usage
 
-#### 基本语法
+#### Basic syntax
 
 ```bash
 uv run python main.py <command> [options]
 ```
 
-#### 可用命令
+#### Available commands
 
-| 命令 | 描述 |
-|------|------|
-| `add` | 添加备份策略 |
-| `rm` / `remove` | 删除备份策略 |
-| `edit` | 编辑已有备份策略 |
-| `all` | 查看所有备份策略 |
-| `save` | 执行备份 |
-| `watch` | 定时执行备份 |
-| `restore` | 从备份文件还原 |
-| `info` | 查看备份文件详情 |
-| `diff` | 对比源目录与备份的差异 |
-| `verify` | 校验备份文件完整性 |
-| `search` | 在备份中搜索文件 |
-| `xsearch` | 跨多个备份档案搜索 |
-| `versions` | 查看备份版本历史 |
-| `sftp` | SFTP 远程备份管理 |
-| `webdav` | WebDAV 远程备份管理 |
-| `remote` | 远程文件管理（list/rm） |
-| `task` | 备份任务队列管理 |
-| `audit` | 审计日志查询 |
-| `hooks` | 手动执行 Pre/Post Hook |
-| `profile` | 配置 Profile 管理 |
-| `rotate` | 备份轮转清理 |
-| `clean` | 清理旧备份 |
-| `diskcheck` | 磁盘空间预估 |
-| `benchmark` | 压缩格式基准测试 |
-| `integrity` | 备份目录完整性校验 |
-| `dry-run` | 预览备份文件选择 |
-| `export` / `import` | 导出/导入备份策略 |
-| `ignore` | 生成 .sbackupignore 文件 |
-| `schedule` | 导出定时调度配置 |
-| `webhook` | 配置 Webhook 预设 |
-| `config` | 配置加密/校验 |
-| `report` | 生成备份报告 |
-| `completion` | 生成 Shell 补全脚本 |
-| `wizard` | 交互式配置向导 |
-| `status` | 备份状态仪表盘 |
-| `version` | 查看版本信息 |
-| `help` | 查看帮助信息 |
+| Command | Description |
+|---------|-------------|
+| `add` | Add a backup strategy |
+| `rm` / `remove` | Remove a backup strategy |
+| `edit` | Edit an existing backup strategy |
+| `all` | List all backup strategies |
+| `save` | Run backup |
+| `watch` | Run backup on a schedule |
+| `restore` | Restore from a backup file |
+| `info` | View backup file details |
+| `diff` | Compare source directory against backup |
+| `verify` | Verify backup file integrity |
+| `search` | Search for files inside a backup |
+| `xsearch` | Search across multiple backup archives |
+| `versions` | View backup version history |
+| `sftp` | SFTP remote backup management |
+| `webdav` | WebDAV remote backup management |
+| `remote` | Remote file management (list/rm) |
+| `task` | Backup task queue management |
+| `audit` | Audit log queries |
+| `hooks` | Manually run Pre/Post hooks |
+| `profile` | Configuration profile management |
+| `rotate` | Backup rotation cleanup |
+| `clean` | Clean old backups |
+| `diskcheck` | Disk space estimation |
+| `benchmark` | Compression format benchmark |
+| `integrity` | Backup directory integrity check |
+| `dry-run` | Preview backup file selection |
+| `export` / `import` | Export/import backup strategies |
+| `ignore` | Generate .sbackupignore file |
+| `schedule` | Export scheduled task configuration |
+| `webhook` | Configure webhook presets |
+| `config` | Configuration encryption/validation |
+| `report` | Generate backup report |
+| `completion` | Generate shell completion scripts |
+| `wizard` | Interactive configuration wizard |
+| `status` | Backup status dashboard |
+| `version` | Show version information |
+| `help` | Show help information |
 
-#### 全局参数
+#### Global options
 
-| 参数 | 描述 |
-|------|------|
-| `--lang zh_CN` / `en_US` / `fr_FR` / `es_ES` / `ru_RU` / `de_DE` / `ja_JP` / `pt_BR` / `ko_KR` | 设置界面语言（持久化到 config.json） |
-| `--format zip` / `tar` / `tar.gz` / `tar.bz2` / `tar.xz` / `tar.zst` / `7z` | 设置打包格式（持久化到 config.json） |
-| `--debug` | 开启调试日志 |
+| Option | Description |
+|--------|-------------|
+| `--lang zh_CN` / `en_US` / `fr_FR` / `es_ES` / `ru_RU` / `de_DE` / `ja_JP` / `pt_BR` / `ko_KR` | Set UI language (persisted in config.json) |
+| `--format zip` / `tar` / `tar.gz` / `tar.bz2` / `tar.xz` / `tar.zst` / `7z` | Set archive format (persisted in config.json) |
+| `--debug` | Enable debug logging |
 
-#### 添加备份策略
+#### Adding a backup strategy
 
 ```bash
 uv run python main.py add <source> <dest> [-i ignore_patterns]
 ```
 
-参数说明：
-- **source**：需要备份的源文件夹路径
-- **dest**：备份文件存放的目标路径
-- **-i, --ignore**：需要忽略的文件或文件夹名称，使用逗号分隔（默认：`.git,__pycache__`）
-- **--format**：条目级打包格式（仅作用于该备份策略，不指定则使用全局默认）：`zip` / `tar` / `tar.gz` / `tar.bz2` / `tar.xz` / `tar.zst` / `7z`
+Parameters:
+- **source** -- path to the folder to back up
+- **dest** -- path where backup files are stored
+- **-i, --ignore** -- comma-separated names of files or folders to skip (default: `.git,__pycache__`)
+- **--format** -- per-entry archive format (overrides the global default for this strategy only): `zip` / `tar` / `tar.gz` / `tar.bz2` / `tar.xz` / `tar.zst` / `7z`
 
-示例：
+Examples:
 ```bash
-# 使用全局默认格式添加策略
+# Add strategy using the global default format
 uv run python main.py add F:/my_folder F:/backup -i node_modules,.git
 
-# 为该策略指定 tar.gz 格式（每次备份此文件夹都使用 tar.gz）
+# Specify tar.gz for this strategy (every backup of this folder uses tar.gz)
 uv run python main.py add F:/my_folder F:/backup --format tar.gz
 
-# 指定 7z 格式（仅此文件夹）
+# Specify 7z for this folder only
 uv run python main.py add F:/my_folder F:/backup --format 7z
 ```
 
-#### 删除备份策略
+#### Removing a backup strategy
 
 ```bash
 uv run python main.py rm <path>
 ```
 
-参数说明：
-- **path**：需要删除备份策略的源文件夹路径
+Parameters:
+- **path** -- source folder path of the strategy to remove
 
-示例：
+Example:
 ```bash
 uv run python main.py rm F:/my_folder
 ```
 
-#### 查看所有备份策略
+#### Listing all backup strategies
 
 ```bash
 uv run python main.py all
 ```
 
-显示当前所有已配置的备份策略。
+Displays all currently configured backup strategies.
 
-#### 执行备份
+#### Running a backup
 
 ```bash
-# 使用默认格式（ZIP）
+# Use default format (ZIP)
 uv run python main.py save
 
-# 使用 tar.gz 格式
+# Use tar.gz format
 uv run python main.py --format tar.gz save
 
-# 保留最近 5 个备份文件，自动清理旧的
+# Keep only the 5 most recent backups, auto-clean old ones
 uv run python main.py save --keep 5
 
-# 使用 7z 格式并加密
+# Use 7z format with encryption
 uv run python main.py --format 7z save --password mysecret
 
-# 英文界面 + tar.xz 格式
+# English UI + tar.xz format
 uv run python main.py --lang en_US --format tar.xz save
 ```
 
-**save 命令参数：**
+**save options:**
 
-| 参数 | 默认值 | 描述 |
-|------|--------|------|
-| `--keep N` | `0` | 保留最近 N 个备份文件，0 表示不清理 |
-| `--password PASSWORD` | `""` | 加密密码（仅 7z 格式支持） |
-| `--sftp` | `false` | 备份完成后上传到 SFTP 服务器 |
-| `--webdav` | `false` | 备份完成后上传到 WebDAV 服务器 |
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--keep N` | `0` | Keep the N most recent backup files; 0 means no cleanup |
+| `--password PASSWORD` | `""` | Encryption password (7z format only) |
+| `--sftp` | `false` | Upload to SFTP server after backup |
+| `--webdav` | `false` | Upload to WebDAV server after backup |
 
-根据备份策略，自动备份已更改的文件夹。
+Backs up changed folders automatically according to the configured strategies.
 
-#### 定时备份
+#### Scheduled backup
 
 ```bash
-# 每 60 分钟执行一次备份
+# Back up every 60 minutes
 uv run python main.py watch --interval 60
 
-# 每 2 小时备份一次，保留最近 10 个文件
+# Back up every 2 hours, keep the 10 most recent files
 uv run python main.py watch --interval 120 --keep 10
 
-# 定时备份 + 7z 加密
+# Scheduled backup + 7z encryption
 uv run python main.py --format 7z watch --interval 60 --password mysecret
 ```
 
-**watch 命令参数：**
+**watch options:**
 
-| 参数 | 默认值 | 描述 |
-|------|--------|------|
-| `--interval MINUTES` | `60` | 备份间隔（分钟） |
-| `--keep N` | `0` | 保留最近 N 个备份文件 |
-| `--password PASSWORD` | `""` | 加密密码（仅 7z 格式支持） |
-| `--sftp` | `false` | 每次备份后上传到 SFTP 服务器 |
-| `--webdav` | `false` | 每次备份后上传到 WebDAV 服务器 |
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--interval MINUTES` | `60` | Backup interval in minutes |
+| `--keep N` | `0` | Keep the N most recent backup files |
+| `--password PASSWORD` | `""` | Encryption password (7z format only) |
+| `--sftp` | `false` | Upload to SFTP server after each backup |
+| `--webdav` | `false` | Upload to WebDAV server after each backup |
 
-按 `Ctrl+C` 停止定时备份。
+Press `Ctrl+C` to stop scheduled backup.
 
-#### 还原备份
+#### Restoring a backup
 
 ```bash
 uv run python main.py restore <backup_file> <target_dir>
 ```
 
-参数说明：
-- **backup_file**：备份文件路径（支持 .zip / .tar / .tar.gz / .tar.bz2 / .tar.xz / .tar.zst / .7z）
-- **target_dir**：还原目标目录
+Parameters:
+- **backup_file** -- path to the backup file (supports .zip / .tar / .tar.gz / .tar.bz2 / .tar.xz / .tar.zst / .7z)
+- **target_dir** -- directory to restore into
 
-示例：
+Examples:
 ```bash
 uv run python main.py restore F:/backup/my_folder.tar.gz F:/restored
 uv run python main.py restore F:/backup/my_folder.7z F:/restored
 uv run python main.py restore F:/backup/my_folder.tar.zst F:/restored
 ```
 
-#### SFTP 远程备份
+#### SFTP remote backup
 
 ```bash
-# ============ 快速开始（推荐） ============
-# 1. 配置 SFTP（自动检测 SSH 私钥，无需手动指定）
+# ============ Quick start (recommended) ============
+# 1. Configure SFTP (auto-detects SSH private key, no manual setup needed)
 sbackup sftp config --host 192.168.1.100 --user admin --remote-path /backups
 
-# 2. 测试连接
+# 2. Test connection
 sbackup sftp test
 
-# 3. 执行备份并上传
+# 3. Run backup and upload
 sbackup save --sftp
 
-# ============ 认证方式 ============
+# ============ Authentication methods ============
 
-# 方式一：自动检测私钥（推荐）
-# 系统自动尝试 ~/.ssh/id_ed25519 → id_rsa → id_ecdsa
+# Method 1: Auto-detect private key (recommended)
+# Automatically tries ~/.ssh/id_ed25519 -> id_rsa -> id_ecdsa
 sbackup sftp config --host 192.168.1.100 --user admin
 
-# 方式二：密码认证
+# Method 2: Password authentication
 sbackup sftp config --host 192.168.1.100 --user admin --password secret
 
-# 方式三：指定私钥
+# Method 3: Specify private key
 sbackup sftp config --host 192.168.1.100 --user admin --key-file ~/.ssh/id_rsa
 
-# 方式四：私钥 + 密码短语（交互式输入）
+# Method 4: Private key + passphrase (interactive input)
 sbackup sftp config --host 192.168.1.100 --user admin --key-file ~/.ssh/id_rsa
 
-# 方式五：私钥 + 密码短语（命令行指定）
+# Method 5: Private key + passphrase (command line)
 sbackup sftp config --host 192.168.1.100 --user admin --key-file ~/.ssh/id_rsa --key-passphrase mykeypass
 
-# ============ 使用场景 ============
+# ============ Use cases ============
 
-# 场景一：一次性备份并上传
+# One-time backup with upload
 sbackup save --sftp
 
-# 场景二：定时备份并自动上传（每 60 分钟）
+# Scheduled backup with auto-upload (every 60 minutes)
 sbackup watch --interval 60 --sftp
 
-# 场景三：指定格式备份 + 上传
+# Specify format + upload
 sbackup --format tar.gz save --sftp
 
-# 场景四：加密备份 + 上传
+# Encrypted backup + upload
 sbackup --format 7z save --password mysecret --sftp
 
-# 场景五：保留最近 5 个备份 + 上传
+# Keep 5 most recent backups + upload
 sbackup save --keep 5 --sftp
 
-# ============ 高级用法 ============
+# ============ Advanced usage ============
 
-# 交互式配置（逐步输入所有参数）
+# Interactive configuration (step-by-step input)
 sbackup sftp config
 
-# 非交互式配置（全部参数在命令行指定）
+# Non-interactive configuration (all parameters on command line)
 sbackup sftp config --host 192.168.1.100 --port 22 --user admin --password secret --remote-path /backups
 
-# 测试连接并查看详细日志
+# Test connection with verbose logging
 sbackup --debug sftp test
 ```
 
-**sftp 子命令：**
+**sftp subcommands:**
 
-| 子命令 | 描述 | 示例 |
-|--------|------|------|
-| `sftp config` | 配置 SFTP 连接参数（host/port/user/password/key_file/key_passphrase/remote_path） | `sbackup sftp config --host 192.168.1.100 --user admin` |
-| `sftp test` | 测试 SFTP 连接是否可用 | `sbackup sftp test` |
+| Subcommand | Description | Example |
+|------------|-------------|---------|
+| `sftp config` | Configure SFTP connection (host/port/user/password/key_file/key_passphrase/remote_path) | `sbackup sftp config --host 192.168.1.100 --user admin` |
+| `sftp test` | Test whether the SFTP connection works | `sbackup sftp test` |
 
-**认证方式：**
+**Authentication methods:**
 
-| 方式 | 参数 | 说明 | 示例 |
-|------|------|------|------|
-| **自动检测** | 不指定认证参数 | 自动尝试 `~/.ssh/id_ed25519` → `id_rsa` → `id_ecdsa`（推荐） | `sbackup sftp config --host ... --user ...` |
-| 密码认证 | `--password` | 直接使用密码登录 | `sbackup sftp config --host ... --user ... --password secret` |
-| 私钥认证 | `--key-file` | 使用指定 SSH 私钥登录 | `sbackup sftp config --host ... --user ... --key-file ~/.ssh/id_rsa` |
-| 私钥+短语 | `--key-file` + `--key-passphrase` | 私钥有密码短语时使用 | `sbackup sftp config --host ... --user ... --key-file ~/.ssh/id_rsa --key-passphrase mypass` |
+| Method | Parameters | Description | Example |
+|--------|-----------|-------------|---------|
+| **Auto-detect** | (none) | Automatically tries `~/.ssh/id_ed25519` -> `id_rsa` -> `id_ecdsa` (recommended) | `sbackup sftp config --host ... --user ...` |
+| Password | `--password` | Log in with a password | `sbackup sftp config --host ... --user ... --password secret` |
+| Private key | `--key-file` | Log in with a specific SSH private key | `sbackup sftp config --host ... --user ... --key-file ~/.ssh/id_rsa` |
+| Private key + passphrase | `--key-file` + `--key-passphrase` | When the private key requires a passphrase | `sbackup sftp config --host ... --user ... --key-file ~/.ssh/id_rsa --key-passphrase mypass` |
 
-支持的私钥格式：RSA、Ed25519、ECDSA。
+Supported key formats: RSA, Ed25519, ECDSA.
 
-**跨平台路径支持：**
+**Cross-platform path support:**
 
-| 平台 | 私钥路径示例 | 说明 |
-|------|-------------|------|
-| Linux/mac | `~/.ssh/id_rsa` | 自动展开为 `/home/user/.ssh/id_rsa` |
-| Windows | `~/.ssh/id_rsa` | 自动展开为 `C:\Users\username\.ssh\id_rsa` |
-| 全平台 | 绝对路径 | 直接使用完整路径 |
+| Platform | Key path example | Description |
+|----------|-----------------|-------------|
+| Linux/macOS | `~/.ssh/id_rsa` | Expands to `/home/user/.ssh/id_rsa` |
+| Windows | `~/.ssh/id_rsa` | Expands to `C:\Users\username\.ssh\id_rsa` |
+| All platforms | Absolute path | Use the full path directly |
 
-SFTP 配置保存在 `config.json` 的 `sftp` 字段中，支持命令行参数或交互式输入。
+SFTP configuration is stored in the `sftp` field of `config.json` and can be set via command line or interactive input.
 
-#### 查看版本信息
+#### Viewing version information
 
 ```bash
 sbackup version
 ```
 
-## 配置文件
+## Configuration
 
-Sbackup 支持通过 `config.json` 文件进行自定义配置。配置文件应放在项目根目录下。
+Sbackup supports customization through a `config.json` file placed in the project root directory.
 
-### 配置项说明
+### Configuration options
 
 ```json
 {
@@ -375,27 +381,27 @@ Sbackup 支持通过 `config.json` 文件进行自定义配置。配置文件应
 }
 ```
 
-| 配置项 | 类型 | 默认值 | 描述 |
-|--------|------|--------|------|
-| `compression_format` | string | `"ZIP"` | 打包格式，可选值：`ZIP`, `TAR`, `TAR_GZ`, `TAR_BZ2`, `TAR_XZ`, `TAR_ZST`, `7Z` |
-| `compression.algorithm` | string | `"ZIP_DEFLATED"` | ZIP 压缩算法，可选值：`ZIP_DEFLATED`, `ZIP_STORED`, `ZIP_BZIP2`, `ZIP_LZMA` |
-| `compression.level` | int | `6` | 压缩级别，范围 0-9（0 为不压缩，9 为最高压缩） |
-| `skip_patterns` | list | `[".git", "__pycache__"]` | 需要忽略的文件或文件夹模式（支持 fnmatch 通配符和路径匹配） |
-| `data_file` | string | 平台默认路径 | 备份策略数据文件的存放路径 |
-| `lang` | string | `"zh_CN"` | 界面语言，可选值：`zh_CN`, `en_US`, `fr_FR`, `es_ES`, `ru_RU`, `de_DE`, `ja_JP`, `pt_BR`, `ko_KR` |
-| `password` | string | `""` | 7z 加密密码 |
-| `sftp.host` | string | `""` | SFTP 服务器地址 |
-| `sftp.port` | int | `22` | SFTP 端口 |
-| `sftp.user` | string | `""` | SFTP 用户名 |
-| `sftp.password` | string | `""` | SFTP 密码（密码认证时使用） |
-| `sftp.key_file` | string | `""` | SSH 私钥文件路径（私钥认证时使用，推荐） |
-| `sftp.key_passphrase` | string | `""` | 私钥密码短语（如有） |
-| `sftp.remote_path` | string | `"/"` | 远程目标路径 |
-| `sftp.enabled` | bool | `false` | 是否启用 SFTP |
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `compression_format` | string | `"ZIP"` | Archive format: `ZIP`, `TAR`, `TAR_GZ`, `TAR_BZ2`, `TAR_XZ`, `TAR_ZST`, `7Z` |
+| `compression.algorithm` | string | `"ZIP_DEFLATED"` | ZIP compression algorithm: `ZIP_DEFLATED`, `ZIP_STORED`, `ZIP_BZIP2`, `ZIP_LZMA` |
+| `compression.level` | int | `6` | Compression level 0-9 (0 = no compression, 9 = maximum) |
+| `skip_patterns` | list | `[".git", "__pycache__"]` | File/folder patterns to skip (supports fnmatch wildcards and path matching) |
+| `data_file` | string | Platform default | Path to the backup strategy data file |
+| `lang` | string | `"zh_CN"` | UI language: `zh_CN`, `en_US`, `fr_FR`, `es_ES`, `ru_RU`, `de_DE`, `ja_JP`, `pt_BR`, `ko_KR` |
+| `password` | string | `""` | 7z encryption password |
+| `sftp.host` | string | `""` | SFTP server address |
+| `sftp.port` | int | `22` | SFTP port |
+| `sftp.user` | string | `""` | SFTP username |
+| `sftp.password` | string | `""` | SFTP password (for password authentication) |
+| `sftp.key_file` | string | `""` | SSH private key file path (for key-based authentication) |
+| `sftp.key_passphrase` | string | `""` | Private key passphrase (if required) |
+| `sftp.remote_path` | string | `"/"` | Remote destination path |
+| `sftp.enabled` | bool | `false` | Whether SFTP is enabled |
 
-### 示例配置
+### Example configuration
 
-使用 tar.bz2 格式进行高压缩率备份：
+Using tar.bz2 format for high-compression backups:
 
 ```json
 {
@@ -403,86 +409,86 @@ Sbackup 支持通过 `config.json` 文件进行自定义配置。配置文件应
   "compression_level": 9,
   "skip_patterns": [".git", "__pycache__", "node_modules", "*.log"],
   "data_file": "backup_strategies.json",
-  "lang": "zh_CN"
+  "lang": "en_US"
 }
 ```
 
-### 打包格式对比
+### Archive format comparison
 
-| 格式 | 扩展名 | 压缩率 | 速度 | 依赖 | 适用场景 |
-|------|--------|--------|------|------|----------|
-| ZIP | .zip | 中 | 快 | 标准库 | 通用，Windows 兼容性最好 |
-| tar | .tar | 无 | 极快 | 标准库 | 纯归档，配合外部压缩 |
-| tar.gz | .tar.gz | 中 | 快 | 标准库 | Linux/macOS 通用 |
-| tar.bz2 | .tar.bz2 | 高 | 中 | 标准库 | 高压缩率归档 |
-| tar.xz | .tar.xz | 最高 | 慢 | 标准库 | 长期归档，空间敏感 |
-| tar.zst | .tar.zst | 中高 | 极快 | zstandard | 现代场景，速度与压缩率平衡 |
-| 7z | .7z | 极高 | 慢 | py7zr | 最高压缩率，支持加密 |
+| Format | Extension | Compression | Speed | Dependencies | Best for |
+|--------|-----------|-------------|-------|--------------|----------|
+| ZIP | .zip | Medium | Fast | stdlib | General purpose, best Windows compatibility |
+| tar | .tar | None | Very fast | stdlib | Archive only, pair with external compression |
+| tar.gz | .tar.gz | Medium | Fast | stdlib | General Linux/macOS use |
+| tar.bz2 | .tar.bz2 | High | Medium | stdlib | High-compression archives |
+| tar.xz | .tar.xz | Highest | Slow | stdlib | Long-term archiving, space-sensitive |
+| tar.zst | .tar.zst | Medium-high | Very fast | zstandard | Modern workloads, speed/size balance |
+| 7z | .7z | Very high | Slow | py7zr | Maximum compression, encryption support |
 
-#### WebDAV 远程备份
+#### WebDAV remote backup
 
-WebDAV 是基于 HTTP 的文件协议，支持坚果云、NextCloud、群晖等主流网盘。使用 Python 标准库 `urllib`，**零额外依赖**。
+WebDAV is an HTTP-based file protocol supported by Jianguoyun, NextCloud, Synology, and other popular cloud drives. Uses Python's standard library `urllib` with **zero extra dependencies**.
 
 ```bash
-# ============ 快速开始 ============
-# 1. 配置 WebDAV
+# ============ Quick start ============
+# 1. Configure WebDAV
 sbackup webdav config --url https://dav.jianguoyun.com/dav/ --user user@example.com --password secret
 
-# 2. 测试连接
+# 2. Test connection
 sbackup webdav test
 
-# 3. 执行备份并上传
+# 3. Run backup and upload
 sbackup save --webdav
 
-# ============ 使用场景 ============
+# ============ Use cases ============
 
-# 场景一：一次性备份并上传
+# One-time backup with upload
 sbackup save --webdav
 
-# 场景二：定时备份并自动上传（每 60 分钟）
+# Scheduled backup with auto-upload (every 60 minutes)
 sbackup watch --interval 60 --webdav
 
-# 场景三：指定远程子目录
+# Specify remote subdirectory
 sbackup webdav config --url https://dav.jianguoyun.com/dav/ --user user@example.com --remote-path /backups/sbackup
 
-# 场景四：同时上传到 SFTP 和 WebDAV
+# Upload to SFTP and WebDAV simultaneously
 sbackup save --sftp --webdav
 
-# ============ 常见 WebDAV 服务地址 ============
-# 坚果云: https://dav.jianguoyun.com/dav/
+# ============ Common WebDAV service URLs ============
+# Jianguoyun: https://dav.jianguoyun.com/dav/
 # NextCloud: https://your-server/remote.php/dav/files/username/
-# 群晖: https://your-synology:5006/webdav/
+# Synology: https://your-synology:5006/webdav/
 ```
 
-**webdav 子命令：**
+**webdav subcommands:**
 
-| 子命令 | 描述 | 示例 |
-|--------|------|------|
-| `webdav config` | 配置 WebDAV 连接参数（url/user/password/remote_path） | `sbackup webdav config --url ... --user ...` |
-| `webdav test` | 测试 WebDAV 连接是否可用 | `sbackup webdav test` |
+| Subcommand | Description | Example |
+|------------|-------------|---------|
+| `webdav config` | Configure WebDAV connection (url/user/password/remote_path) | `sbackup webdav config --url ... --user ...` |
+| `webdav test` | Test whether the WebDAV connection works | `sbackup webdav test` |
 
-| 参数 | 默认值 | 描述 |
-|------|--------|------|
-| `--url URL` | `""` | WebDAV 服务器地址（如 `https://dav.jianguoyun.com/dav/`） |
-| `--user USER` | `""` | WebDAV 用户名（通常为邮箱） |
-| `--password PASS` | `""` | WebDAV 密码（坚果云需在设置中生成应用密码） |
-| `--remote-path PATH` | `/` | 远程目标路径 |
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--url URL` | `""` | WebDAV server URL (e.g. `https://dav.jianguoyun.com/dav/`) |
+| `--user USER` | `""` | WebDAV username (usually an email address) |
+| `--password PASS` | `""` | WebDAV password (Jianguoyun requires generating an app password in settings) |
+| `--remote-path PATH` | `/` | Remote destination path |
 
-## 实现原理
+## How It Works
 
-Sbackup 通过以下方式实现备份功能：
+Sbackup implements backup through the following mechanisms:
 
-1. **备份策略存储**：备份策略存储在 JSON 文件中，包含文件夹路径、最后修改时间、目标路径、忽略模式和条目级打包格式。
-2. **增量备份**：通过比较文件夹的最后修改时间，仅备份已更改的文件夹。
-3. **多格式压缩**：使用 Python 内置的 `zipfile` 和 `tarfile` 模块，以及 `zstandard` 和 `py7zr` 第三方库，支持 7 种打包格式。
-4. **条目级格式**：每个备份策略可指定独立的打包格式（`add --format`），优先于全局 `--format` 设置；未指定时使用全局默认。
-5. **备份清理**：备份成功后自动扫描目标目录，按修改时间排序，删除超出保留数量的旧文件。
-6. **加密备份**：7z 格式支持 LZMA2 加密，通过 `--password` 参数或 `config.json` 配置。
-7. **定时备份**：`watch` 命令在循环中按指定间隔执行备份，`Ctrl+C` 安全退出。
-8. **备份历史**：每次备份后记录时间戳、文件大小和文件数量，保留最近 100 条记录。
-9. **SFTP 远程备份**：基于 paramiko 库实现 SFTP 客户端，支持连接测试、自动创建远程目录、带进度条的文件上传。
+1. **Strategy storage** -- backup strategies are stored in a JSON file containing folder paths, last-modified timestamps, target paths, ignore patterns, and per-entry archive formats.
+2. **Incremental backup** -- by comparing each folder's last-modified timestamp, only changed folders are backed up.
+3. **Multi-format compression** -- uses Python's built-in `zipfile` and `tarfile` modules, plus `zstandard` and `py7zr` third-party libraries, supporting seven archive formats.
+4. **Per-entry format** -- each strategy can specify its own archive format (`add --format`), which takes priority over the global `--format` setting; when not specified, the global default is used.
+5. **Backup cleanup** -- after a successful backup, the target directory is scanned, sorted by modification time, and older files exceeding the retention count are deleted.
+6. **Encrypted backup** -- the 7z format supports LZMA2 encryption via the `--password` parameter or the `password` field in `config.json`.
+7. **Scheduled backup** -- the `watch` command runs backups in a loop at the specified interval; `Ctrl+C` exits safely.
+8. **Backup history** -- each backup records a timestamp, file size, and file count, keeping the 100 most recent entries.
+9. **SFTP remote backup** -- an SFTP client built on paramiko with connection testing, automatic remote directory creation, and progress-bar file uploads.
 
-### 数据文件格式
+### Data file format
 
 ```json
 {
@@ -509,151 +515,151 @@ Sbackup 通过以下方式实现备份功能：
 }
 ```
 
-每个备份策略条目为 4 元素列表：`[mtime, target, skip_patterns, compression_format]`
+Each backup strategy entry is a 4-element list: `[mtime, target, skip_patterns, compression_format]`
 
-| 字段 | 说明 |
-|------|------|
-| `mtime` | 源文件夹最后修改时间（用于增量备份判断） |
-| `target` | 备份文件存放的目标路径 |
-| `skip_patterns` | 需忽略的文件/文件夹模式列表 |
-| `compression_format` | 条目级打包格式（空字符串表示使用全局默认） |
+| Field | Description |
+|-------|-------------|
+| `mtime` | Last-modified timestamp of the source folder (used for incremental backup decisions) |
+| `target` | Target path where backup files are stored |
+| `skip_patterns` | List of file/folder patterns to skip |
+| `compression_format` | Per-entry archive format (empty string means use the global default) |
 
-## 开发指南
+## Development Guide
 
-### 运行测试
+### Running tests
 
 ```bash
 uv run coverage run -m unittest discover -s tests -t . && uv run coverage report -m
 ```
 
-### 代码结构
+### Code structure
 
 ```
 sbackup/
-├── main.py              # 程序入口
+├── main.py              # Entry point
 ├── sbackup/
-│   ├── __init__.py      # 导出核心函数
-│   ├── __main__.py      # python -m sbackup 入口
-│   ├── cli.py           # CLI 参数解析和命令分发（30+ 命令）
-│   ├── config.py        # 配置加载、加密、Webhook/SMTP 配置
-│   ├── auto_save.py     # BackupManager 核心引擎
-│   ├── compression.py   # 7 种格式压缩/解压引擎
-│   ├── i18n.py          # 国际化（9 种语言）
-│   ├── sftp.py          # SFTP 远程备份客户端（paramiko）
-│   ├── webdav.py        # WebDAV 远程备份客户端（零依赖）
-│   ├── cloud_storage.py # S3 云存储客户端（minio）
-│   ├── multi_dest.py    # 多目标并行备份
-│   ├── handlers.py      # SFTP/WebDAV/Remote/Schedule 命令处理
-│   ├── hooks.py         # Pre/Post Hook 执行
-│   ├── audit.py         # 审计日志系统
-│   ├── profile.py       # 配置 Profile 管理
-│   ├── selective.py     # 选择性恢复
-│   ├── cross_search.py  # 跨档案搜索
-│   ├── integrity.py     # SHA256 校验和
-│   ├── rotation.py      # 备份轮转策略
-│   ├── dryrun.py        # Dry-run 预览
-│   ├── diskcheck.py     # 磁盘空间预估
-│   ├── task_queue.py    # 任务队列系统
-│   ├── schema.py        # 配置校验器
-│   ├── benchmark.py     # 压缩基准测试
-│   ├── chunked_backup.py# 块级增量备份
-│   ├── dedup.py         # 文件级 SHA256 去重
-│   ├── export.py        # 元数据导出（CSV/JSON）
-│   ├── monitor.py       # watchdog 文件系统监控
-│   ├── lock.py          # 跨平台进程锁
-│   ├── retry.py         # 指数退避重试
-│   ├── ratelimiter.py   # 令牌桶限速器
-│   ├── keychain.py      # 系统密钥链集成
-│   ├── parity.py        # Reed-Solomon 纠错码
-│   ├── completion.py    # Shell 自动补全
-│   ├── wizard.py        # 交互式配置向导
-│   └── locales/         # 9 种语言翻译文件
+│   ├── __init__.py      # Core function exports
+│   ├── __main__.py      # python -m sbackup entry point
+│   ├── cli.py           # CLI argument parsing and command dispatch (30+ commands)
+│   ├── config.py        # Configuration loading, encryption, webhook/SMTP config
+│   ├── auto_save.py     # BackupManager core engine
+│   ├── compression.py   # 7-format compression/decompression engine
+│   ├── i18n.py          # Internationalization (9 languages)
+│   ├── sftp.py          # SFTP remote backup client (paramiko)
+│   ├── webdav.py        # WebDAV remote backup client (zero dependencies)
+│   ├── cloud_storage.py # S3 cloud storage client (minio)
+│   ├── multi_dest.py    # Multi-destination parallel backup
+│   ├── handlers.py      # SFTP/WebDAV/Remote/Schedule command handlers
+│   ├── hooks.py         # Pre/Post hook execution
+│   ├── audit.py         # Audit log system
+│   ├── profile.py       # Configuration profile management
+│   ├── selective.py     # Selective restore
+│   ├── cross_search.py  # Cross-archive search
+│   ├── integrity.py     # SHA256 checksums
+│   ├── rotation.py      # Backup rotation policies
+│   ├── dryrun.py        # Dry-run preview
+│   ├── diskcheck.py     # Disk space estimation
+│   ├── task_queue.py    # Task queue system
+│   ├── schema.py        # Configuration validator
+│   ├── benchmark.py     # Compression benchmarks
+│   ├── chunked_backup.py# Block-level incremental backup
+│   ├── dedup.py         # File-level SHA256 deduplication
+│   ├── export.py        # Metadata export (CSV/JSON)
+│   ├── monitor.py       # watchdog filesystem monitor
+│   ├── lock.py          # Cross-platform process lock
+│   ├── retry.py         # Exponential backoff retry
+│   ├── ratelimiter.py   # Token bucket rate limiter
+│   ├── keychain.py      # System keychain integration
+│   ├── parity.py        # Reed-Solomon error correction
+│   ├── completion.py    # Shell auto-completion
+│   ├── wizard.py        # Interactive configuration wizard
+│   └── locales/         # Translation files for 9 languages
 └── tests/
     └── sbackup/
-        └── test_*.py    # 30 个测试文件，覆盖所有模块
+        └── test_*.py    # 30 test files covering all modules
 ```
 
-### 添加新功能
+### Adding new features
 
-1. 在 `sbackup/` 目录下创建新的模块文件
-2. 在 `sbackup/__init__.py` 中导入新功能的函数
-3. 在 `run()` 函数中添加新的命令行命令处理逻辑
-4. 在 `tests/` 目录下添加对应的测试文件
+1. Create a new module file under `sbackup/`
+2. Import the new functions in `sbackup/__init__.py`
+3. Add command-line command handling in the `run()` function
+4. Add corresponding test files under `tests/`
 
-## 常见问题
+## FAQ
 
-### Q: 备份策略文件被误删了怎么办？
+### Q: What if the backup strategy file is accidentally deleted?
 
-A: 备份策略存储在数据文件中。如果误删，可以通过重新运行 `add` 命令重新添加备份策略。
+A: Backup strategies are stored in the data file. If accidentally deleted, you can re-add them by running the `add` command again.
 
-### Q: 如何修改已添加的备份策略？
+### Q: How do I modify an existing backup strategy?
 
-A: 使用 `sbackup edit` 命令：`sbackup edit <source> --dest <new_dest> --ignore <patterns> --format <fmt>`。
+A: Use the `sbackup edit` command: `sbackup edit <source> --dest <new_dest> --ignore <patterns> --format <fmt>`.
 
-### Q: 支持远程备份吗？
+### Q: Is remote backup supported?
 
-A: 支持！提供三种远程备份方式：
-- **SFTP**：`sbackup sftp config` 配置，`sbackup save --sftp` 上传
-- **WebDAV**：`sbackup webdav config` 配置，`sbackup save --webdav` 上传（支持坚果云/NextCloud/群晖）
-- **S3 云存储**：在 `config.json` 中配置 `cloud` 字段，`sbackup save --cloud` 上传
-- 可同时启用多种：`sbackup save --sftp --webdav --cloud`
+A: Yes! Three remote backup methods are available:
+- **SFTP**: configure with `sbackup sftp config`, upload with `sbackup save --sftp`
+- **WebDAV**: configure with `sbackup webdav config`, upload with `sbackup save --webdav` (supports Jianguoyun, NextCloud, Synology)
+- **S3 cloud storage**: configure the `cloud` field in `config.json`, upload with `sbackup save --cloud`
+- Multiple can be combined: `sbackup save --sftp --webdav --cloud`
 
-### Q: tar.gz 和 ZIP 有什么区别？
+### Q: What is the difference between tar.gz and ZIP?
 
-A: tar.gz 在 Linux/macOS 上更常用，压缩率略高；ZIP 在 Windows 上更通用，兼容性最好。tar.bz2 和 tar.xz 提供更高的压缩率但速度较慢。tar.zst 是现代算法，速度极快且压缩率不错。7z 压缩率最高且支持加密。
+A: tar.gz is more common on Linux/macOS with slightly better compression; ZIP is more universal on Windows with the best compatibility. tar.bz2 and tar.xz offer higher compression but are slower. tar.zst is a modern algorithm that is extremely fast with good compression. 7z has the highest compression and supports encryption.
 
-### Q: 如何加密备份？
+### Q: How do I encrypt a backup?
 
-A: 使用 7z 格式并设置密码：`uv run python main.py --format 7z save --password yourpassword`。密码也可以写入 `config.json` 的 `password` 字段。
+A: Use the 7z format with a password: `uv run python main.py --format 7z save --password yourpassword`. The password can also be set in the `password` field of `config.json`.
 
-### Q: 如何自动清理旧备份？
+### Q: How do I automatically clean old backups?
 
-A: 使用 `--keep` 参数：`uv run python main.py save --keep 5` 只保留最近 5 个备份文件。定时备份时同样支持：`uv run python main.py watch --interval 60 --keep 10`。
+A: Use the `--keep` parameter: `uv run python main.py save --keep 5` keeps only the 5 most recent backup files. This also works with scheduled backups: `uv run python main.py watch --interval 60 --keep 10`.
 
-### Q: 如何设置定时备份？
+### Q: How do I set up scheduled backups?
 
-A: 使用 `watch` 命令：`uv run python main.py watch --interval 60` 每 60 分钟备份一次。按 `Ctrl+C` 停止。
+A: Use the `watch` command: `uv run python main.py watch --interval 60` backs up every 60 minutes. Press `Ctrl+C` to stop.
 
-### Q: 密码存储安全吗？
+### Q: Is password storage secure?
 
-A: `config.json` 中的 SFTP 密码和 7z 加密密码均以**明文**存储。请确保 `config.json` 文件的访问权限仅限于可信用户（例如 `chmod 600 config.json`）。不要将包含密码的 `config.json` 提交到版本控制系统。
+A: SFTP passwords and 7z encryption passwords in `config.json` are stored in **plain text**. Ensure that the `config.json` file is accessible only to trusted users (e.g. `chmod 600 config.json`). Do not commit `config.json` containing passwords to version control.
 
-## 贡献指南
+## Contributing
 
-欢迎提交 Issue 和 Pull Request！
+Issues and Pull Requests are welcome!
 
-1. Fork 本仓库
-2. 创建你的特性分支 (`git checkout -b feature/AmazingFeature`)
-3. 提交你的更改 (`git commit -m 'Add some AmazingFeature'`)
-4. 推送到分支 (`git push origin feature/AmazingFeature`)
-5. 提交 Pull Request
+1. Fork the repository
+2. Create your feature branch (`git checkout -b feature/AmazingFeature`)
+3. Commit your changes (`git commit -m 'Add some AmazingFeature'`)
+4. Push to the branch (`git push origin feature/AmazingFeature`)
+5. Open a Pull Request
 
-### 代码风格
+### Code style
 
-本项目遵循 PEP 8 和 Google Python Style Guide。请确保你的代码：
-- 使用类型注解
-- 遵循 Google 风格的 docstrings
-- 通过所有单元测试
+This project follows PEP 8 and the Google Python Style Guide. Please ensure your code:
+- Uses type annotations
+- Follows Google-style docstrings
+- Passes all unit tests
 
-## 许可证
+## License
 
-本项目采用 GNU GPL v3.0 许可证。详情请参阅 [LICENSE](LICENSE) 文件。
+This project is licensed under the GNU GPL v3.0 License. See the [LICENSE](LICENSE) file for details.
 
-## 作者
+## Author
 
 **xiatianxuan** (CodeSeed)
 
 - [Gitee](https://gitee.com/xiatianxuan)
-- [个人主页](https://xnors-codeseed.pages.dev/)
+- [Homepage](https://xnors-codeseed.pages.dev/)
 
-## 特别鸣谢
+## Special Thanks
 
 - [Xnors Studio](https://xnors.github.io/)
 
-## 联系我们
+## Contact
 
-如有问题或建议，请发送邮件至：xiatianxuan2025@163.com
+For questions or suggestions, please email: xiatianxuan2025@163.com
 
 ---
 
-*最后更新：2026年6月19日*
+*Last updated: June 19, 2026*
