@@ -10,7 +10,7 @@ from sbackup.i18n import set_locale, t
 from sbackup.config import Config, load_config, save_lang, save_format
 from sbackup.compression import restore_backup
 
-VERSION = "1.0.1"
+VERSION = "2.0.0"
 logger = logging.getLogger(__name__)
 
 
