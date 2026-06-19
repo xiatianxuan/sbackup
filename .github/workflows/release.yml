@@ -37,7 +37,7 @@ jobs:
           python-version: '3.12'
 
       - name: Install dependencies
-        run: pip install nuitka py7zr tqdm zstandard
+        run: pip install nuitka py7zr tqdm zstandard paramiko minio reedsolo watchdog
 
       - name: Build executable
         run: |
@@ -50,6 +50,10 @@ jobs:
             --include-package=py7zr `
             --include-package=tqdm `
             --include-package=zstandard `
+            --include-package=paramiko `
+            --include-package=minio `
+            --include-package=reedsolo `
+            --include-package=watchdog `
             main.py
 
       - name: Upload to Release
@@ -68,7 +72,7 @@ jobs:
           python-version: '3.12'
 
       - name: Install dependencies
-        run: pip install nuitka py7zr tqdm zstandard
+        run: pip install nuitka py7zr tqdm zstandard paramiko minio reedsolo watchdog
 
       - name: Build executable
         run: |
@@ -81,6 +85,10 @@ jobs:
             --include-package=py7zr \
             --include-package=tqdm \
             --include-package=zstandard \
+            --include-package=paramiko \
+            --include-package=minio \
+            --include-package=reedsolo \
+            --include-package=watchdog \
             main.py
 
       - name: Upload to Release
@@ -99,7 +107,7 @@ jobs:
           python-version: '3.12'
 
       - name: Install dependencies
-        run: pip install nuitka py7zr tqdm zstandard
+        run: pip install nuitka py7zr tqdm zstandard paramiko minio reedsolo watchdog
 
       - name: Build executable
         run: |
@@ -112,6 +120,10 @@ jobs:
             --include-package=py7zr \
             --include-package=tqdm \
             --include-package=zstandard \
+            --include-package=paramiko \
+            --include-package=minio \
+            --include-package=reedsolo \
+            --include-package=watchdog \
             main.py
 
       - name: Upload to Release

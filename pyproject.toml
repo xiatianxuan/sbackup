@@ -31,8 +31,8 @@ dependencies = [
 sbackup = "sbackup:run"
 
 [project.urls]
-Homepage = "https://gitee.com/xiatianxuan"
-Repository = "https://gitee.com/xiatianxuan/sbackup"
+Homepage = "https://github.com/xiatianxuan/sbackup"
+Repository = "https://github.com/xiatianxuan/sbackup"
 
 [dependency-groups]
 dev = [

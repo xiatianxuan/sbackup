@@ -34,14 +34,24 @@ Sbackup 是一个轻量级的文件夹备份工具，支持通过命令行添加
 - ✅ **多格式支持**：支持 ZIP、tar、tar.gz、tar.bz2、tar.xz、tar.zst、7z 七种打包格式，全局和条目级均可独立指定
 - ✅ **SFTP 远程备份**：基于 paramiko 库，支持密码/SSH 私钥认证、自动检测默认私钥
 - ✅ **WebDAV 远程备份**：基于标准库 urllib，零额外依赖，支持坚果云/NextCloud/群晖
-- ✅ **备份还原**：支持从备份文件解压还原到指定目录
-- ✅ **备份清理**：自动删除旧备份，仅保留最近 N 个文件
-- ✅ **加密备份**：支持 7z 格式密码加密
-- ✅ **定时备份**：设置间隔自动执行，实现无人值守
-- ✅ **备份历史**：记录每次备份的时间、大小和文件数，方便追溯
-- ✅ **灵活的策略管理**：支持添加、删除和查看备份策略
-- ✅ **自定义配置**：支持通过 `config.json` 自定义压缩算法、忽略模式等
-- ✅ **国际化**：支持中文、英语、法语、西班牙语、俄语、德语、日语、葡萄牙语、韩语九种语言，可随时切换
+- ✅ **S3 云存储**：基于 minio 库，支持所有 S3 兼容存储（AWS/MinIO/阿里云 OSS 等）
+- ✅ **多目标并行备份**：同时备份到本地 + 多个远程目标，互不影响
+- ✅ **备份还原**：支持从备份文件解压还原到指定目录，支持选择性恢复
+- ✅ **备份清理**：自动删除旧备份，支持按数量/时间/每日保留策略
+- ✅ **加密备份**：支持 7z 格式密码加密 + 全格式 PBKDF2 加密
+- ✅ **定时备份**：设置间隔自动执行，支持实时文件监控（watchdog）
+- ✅ **备份历史**：记录每次备份的时间、大小、SHA256 校验和，方便追溯
+- ✅ **审计日志**：记录所有备份/恢复操作的审计事件
+- ✅ **Pre/Post Hook**：备份前后执行自定义命令
+- ✅ **配置 Profile**：支持多配置方案的保存、切换、导入导出
+- ✅ **跨档案搜索**：在多个备份文件中搜索匹配的文件名
+- ✅ **数据完整性**：SHA256 校验和生成与验证，Reed-Solomon 纠错码
+- ✅ **配置校验**：自动校验配置参数合法性，检测篡改
+- ✅ **任务队列**：管理备份任务队列，支持添加、执行、取消
+- ✅ **压缩基准测试**：比较不同格式/级别的压缩性能
+- ✅ **磁盘空间预估**：按文件类型估算备份大小，检查目标空间
+- ✅ **国际化**：支持中文、英语、法语、西班牙语、俄语、德语、日语、葡萄牙语、韩语九种语言
+- ✅ **Shell 补全**：支持 bash/zsh/fish/powershell 自动补全
 - ✅ **轻量高效**：体积小，启动速度快，资源占用低
 - ✅ **跨平台支持**：支持 Windows、macOS 和 Linux
 
@@ -78,13 +88,40 @@ uv run python main.py <command> [options]
 | 命令 | 描述 |
 |------|------|
 | `add` | 添加备份策略 |
-| `rm` 或 `remove` | 删除备份策略 |
+| `rm` / `remove` | 删除备份策略 |
+| `edit` | 编辑已有备份策略 |
 | `all` | 查看所有备份策略 |
 | `save` | 执行备份 |
 | `watch` | 定时执行备份 |
 | `restore` | 从备份文件还原 |
+| `info` | 查看备份文件详情 |
+| `diff` | 对比源目录与备份的差异 |
+| `verify` | 校验备份文件完整性 |
+| `search` | 在备份中搜索文件 |
+| `xsearch` | 跨多个备份档案搜索 |
+| `versions` | 查看备份版本历史 |
 | `sftp` | SFTP 远程备份管理 |
 | `webdav` | WebDAV 远程备份管理 |
+| `remote` | 远程文件管理（list/rm） |
+| `task` | 备份任务队列管理 |
+| `audit` | 审计日志查询 |
+| `hooks` | 手动执行 Pre/Post Hook |
+| `profile` | 配置 Profile 管理 |
+| `rotate` | 备份轮转清理 |
+| `clean` | 清理旧备份 |
+| `diskcheck` | 磁盘空间预估 |
+| `benchmark` | 压缩格式基准测试 |
+| `integrity` | 备份目录完整性校验 |
+| `dry-run` | 预览备份文件选择 |
+| `export` / `import` | 导出/导入备份策略 |
+| `ignore` | 生成 .sbackupignore 文件 |
+| `schedule` | 导出定时调度配置 |
+| `webhook` | 配置 Webhook 预设 |
+| `config` | 配置加密/校验 |
+| `report` | 生成备份报告 |
+| `completion` | 生成 Shell 补全脚本 |
+| `wizard` | 交互式配置向导 |
+| `status` | 备份状态仪表盘 |
 | `version` | 查看版本信息 |
 | `help` | 查看帮助信息 |
 
@@ -495,25 +532,45 @@ uv run coverage run -m unittest discover -s tests -t . && uv run coverage report
 sbackup/
 ├── main.py              # 程序入口
 ├── sbackup/
-│   ├── __init__.py      # CLI 参数解析和命令分发
+│   ├── __init__.py      # 导出核心函数
 │   ├── __main__.py      # python -m sbackup 入口
-│   ├── config.py        # 配置加载、语言持久化、数据路径
-│   ├── compression.py   # 压缩功能实现
-│   ├── auto_save.py     # 备份策略管理 + 备份历史
-│   ├── sftp.py          # SFTP 远程备份客户端
+│   ├── cli.py           # CLI 参数解析和命令分发（30+ 命令）
+│   ├── config.py        # 配置加载、加密、Webhook/SMTP 配置
+│   ├── auto_save.py     # BackupManager 核心引擎
+│   ├── compression.py   # 7 种格式压缩/解压引擎
+│   ├── i18n.py          # 国际化（9 种语言）
+│   ├── sftp.py          # SFTP 远程备份客户端（paramiko）
 │   ├── webdav.py        # WebDAV 远程备份客户端（零依赖）
-│   └── i18n.py          # 国际化支持
-├── tests/
-│   └── sbackup/
-│       ├── test_auto_save.py   # 备份策略测试
-│       ├── test_compression.py # 压缩功能测试
-│       ├── test_config.py      # 配置加载测试
-│       ├── test_i18n.py        # 国际化测试
-│       ├── test_main.py        # 主模块测试
-│       ├── test_sftp.py        # SFTP 客户端测试
-│       └── test_webdav.py      # WebDAV 客户端测试
-├── config.json          # 配置文件
-└── README.md            # 文档
+│   ├── cloud_storage.py # S3 云存储客户端（minio）
+│   ├── multi_dest.py    # 多目标并行备份
+│   ├── handlers.py      # SFTP/WebDAV/Remote/Schedule 命令处理
+│   ├── hooks.py         # Pre/Post Hook 执行
+│   ├── audit.py         # 审计日志系统
+│   ├── profile.py       # 配置 Profile 管理
+│   ├── selective.py     # 选择性恢复
+│   ├── cross_search.py  # 跨档案搜索
+│   ├── integrity.py     # SHA256 校验和
+│   ├── rotation.py      # 备份轮转策略
+│   ├── dryrun.py        # Dry-run 预览
+│   ├── diskcheck.py     # 磁盘空间预估
+│   ├── task_queue.py    # 任务队列系统
+│   ├── schema.py        # 配置校验器
+│   ├── benchmark.py     # 压缩基准测试
+│   ├── chunked_backup.py# 块级增量备份
+│   ├── dedup.py         # 文件级 SHA256 去重
+│   ├── export.py        # 元数据导出（CSV/JSON）
+│   ├── monitor.py       # watchdog 文件系统监控
+│   ├── lock.py          # 跨平台进程锁
+│   ├── retry.py         # 指数退避重试
+│   ├── ratelimiter.py   # 令牌桶限速器
+│   ├── keychain.py      # 系统密钥链集成
+│   ├── parity.py        # Reed-Solomon 纠错码
+│   ├── completion.py    # Shell 自动补全
+│   ├── wizard.py        # 交互式配置向导
+│   └── locales/         # 9 种语言翻译文件
+└── tests/
+    └── sbackup/
+        └── test_*.py    # 30 个测试文件，覆盖所有模块
 ```
 
 ### 添加新功能
@@ -531,11 +588,15 @@ A: 备份策略存储在数据文件中。如果误删，可以通过重新运�
 
 ### Q: 如何修改已添加的备份策略？
 
-A: 目前不支持直接修改备份策略。你可以先使用 `rm` 删除旧的策略，再使用 `add` 添加新的策略。
+A: 使用 `sbackup edit` 命令：`sbackup edit <source> --dest <new_dest> --ignore <patterns> --format <fmt>`。
 
 ### Q: 支持远程备份吗？
 
-A: 支持！通过 SFTP 功能可以将备份文件上传到远程服务器。使用 `sbackup sftp config` 配置连接参数，然后 `sbackup save --sftp` 即可在备份后自动上传。
+A: 支持！提供三种远程备份方式：
+- **SFTP**：`sbackup sftp config` 配置，`sbackup save --sftp` 上传
+- **WebDAV**：`sbackup webdav config` 配置，`sbackup save --webdav` 上传（支持坚果云/NextCloud/群晖）
+- **S3 云存储**：在 `config.json` 中配置 `cloud` 字段，`sbackup save --cloud` 上传
+- 可同时启用多种：`sbackup save --sftp --webdav --cloud`
 
 ### Q: tar.gz 和 ZIP 有什么区别？
 
@@ -595,4 +656,4 @@ A: `config.json` 中的 SFTP 密码和 7z 加密密码均以**明文**存储。�
 
 ---
 
-*最后更新：2026年5月2日*
+*最后更新：2026年6月19日*
