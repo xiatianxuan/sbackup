@@ -11,7 +11,7 @@ import tempfile
 import shutil
 from pathlib import Path
 from unittest.mock import patch, MagicMock
-from sbackup.i18n import t
+from sbackup.i18n import t, _current_locale, _translations
 
 
 class TestMain(unittest.TestCase):
@@ -20,6 +20,9 @@ class TestMain(unittest.TestCase):
         self.original_argv = sys.argv.copy()
         self._root_handlers = logging.root.handlers[:]
         self._root_level = logging.root.level
+        # 保存 i18n 状态
+        self._orig_locale = _current_locale
+        self._orig_trans = _translations.copy()
         # 创建 config.json 指向测试目录的数据文件
         self.data_path = os.path.join(self.test_dir, "sbackup.json")
         with open(os.path.join(self.test_dir, "config.json"), "w") as f:
@@ -33,6 +36,10 @@ class TestMain(unittest.TestCase):
         shutil.rmtree(self.test_dir, ignore_errors=True)
         logging.root.handlers = self._root_handlers
         logging.root.setLevel(self._root_level)
+        # 恢复 i18n 状态
+        import sbackup.i18n as _i18n_mod
+        _i18n_mod._current_locale = self._orig_locale
+        _i18n_mod._translations = self._orig_trans
 
     @patch("builtins.print")
     def test_version_command(self, mock_print):

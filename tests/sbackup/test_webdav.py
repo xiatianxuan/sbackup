@@ -8,12 +8,15 @@ import shutil
 import unittest
 from unittest.mock import patch, MagicMock
 from sbackup.webdav import WebDAVClient, WebDAVError
+from sbackup.i18n import set_locale
 
 
 class TestWebDAVClient(unittest.TestCase):
     """测试 WebDAVClient"""
 
     def setUp(self):
+        # 确保 locale 为 zh_CN（防止其他测试污染）
+        set_locale("zh_CN")
         self.url = "https://dav.jianguoyun.com/dav/"
         self.user = "test@example.com"
         self.password = "secret"
