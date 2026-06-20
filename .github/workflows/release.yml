@@ -9,123 +9,75 @@ permissions:
   contents: write
 
 jobs:
-  # 发布 PyPI 包（sbackup-cli）
   publish-pypi:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - name: Install uv
         uses: astral-sh/setup-uv@v3
         with:
           version: "latest"
-
       - name: Build
         run: uv build
-
       - name: Publish to PyPI
         run: uv publish --token ${{ secrets.PYPI_TOKEN }}
 
-  # 构建 Windows 可执行文件
-  build-windows:
-    runs-on: windows-latest
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            platform: windows
+            arch: x64
+            ext: .exe
+          - os: macos-13
+            platform: macos
+            arch: x86_64
+            ext: ""
+          - os: macos-latest
+            platform: macos
+            arch: arm64
+            ext: ""
+          - os: ubuntu-latest
+            platform: linux
+            arch: x86_64
+            ext: ""
+          - os: ubuntu-24.04-arm
+            platform: linux
+            arch: aarch64
+            ext: ""
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-
       - name: Install dependencies
         run: pip install nuitka py7zr tqdm zstandard paramiko minio reedsolo watchdog
-
-      - name: Extract version from tag
+      - name: Extract version
         id: version
         shell: bash
         run: echo "VERSION=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
-
       - name: Read release notes
         id: notes
         shell: bash
         run: |
           NOTES_FILE="releases/v${{ steps.version.outputs.VERSION }}.md"
           if [ -f "$NOTES_FILE" ]; then
-            echo "HAS_NOTES=true" >> $GITHUB_OUTPUT
-            # 使用 EOF 分隔符避免特殊字符问题
             echo "NOTES<<EOF" >> $GITHUB_OUTPUT
             cat "$NOTES_FILE" >> $GITHUB_OUTPUT
             echo "" >> $GITHUB_OUTPUT
             echo "EOF" >> $GITHUB_OUTPUT
           else
-            echo "HAS_NOTES=false" >> $GITHUB_OUTPUT
             echo "NOTES=Release v${{ steps.version.outputs.VERSION }}" >> $GITHUB_OUTPUT
           fi
-
       - name: Build executable
-        run: |
-          python -m nuitka `
-            --onefile `
-            --assume-yes-for-downloads `
-            --output-filename=sbackup-${{ steps.version.outputs.VERSION }}-windows-x64.exe `
-            --include-package=sbackup `
-            --include-data-dir=sbackup/locales=sbackup/locales `
-            --include-package=py7zr `
-            --include-package=tqdm `
-            --include-package=zstandard `
-            --include-package=paramiko `
-            --include-package=minio `
-            --include-package=reedsolo `
-            --include-package=watchdog `
-            main.py
-
-      - name: Upload to Release
-        uses: softprops/action-gh-release@v1
-        with:
-          body: ${{ steps.notes.outputs.NOTES }}
-          files: sbackup-${{ steps.version.outputs.VERSION }}-windows-x64.exe
-
-  # 构建 macOS 可执行文件
-  build-macos:
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-
-      - name: Install dependencies
-        run: pip install nuitka py7zr tqdm zstandard paramiko minio reedsolo watchdog
-
-      - name: Extract version from tag
-        id: version
-        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
-
-      - name: Detect architecture
-        id: arch
-        run: echo "ARCH=$(uname -m)" >> $GITHUB_OUTPUT
-
-      - name: Read release notes
-        id: notes
-        run: |
-          NOTES_FILE="releases/v${{ steps.version.outputs.VERSION }}.md"
-          if [ -f "$NOTES_FILE" ]; then
-            echo "HAS_NOTES=true" >> $GITHUB_OUTPUT
-            echo "NOTES<<EOF" >> $GITHUB_OUTPUT
-            cat "$NOTES_FILE" >> $GITHUB_OUTPUT
-            echo "" >> $GITHUB_OUTPUT
-            echo "EOF" >> $GITHUB_OUTPUT
-          else
-            echo "HAS_NOTES=false" >> $GITHUB_OUTPUT
-            echo "NOTES=Release v${{ steps.version.outputs.VERSION }}" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Build executable
+        shell: bash
         run: |
           python -m nuitka \
             --onefile \
             --assume-yes-for-downloads \
-            --output-filename=sbackup-${{ steps.version.outputs.VERSION }}-macos-${{ steps.arch.outputs.ARCH }} \
+            --output-filename=sbackup-${{ steps.version.outputs.VERSION }}-${{ matrix.platform }}-${{ matrix.arch }}${{ matrix.ext }} \
             --include-package=sbackup \
             --include-data-dir=sbackup/locales=sbackup/locales \
             --include-package=py7zr \
@@ -136,68 +88,8 @@ jobs:
             --include-package=reedsolo \
             --include-package=watchdog \
             main.py
-
       - name: Upload to Release
         uses: softprops/action-gh-release@v1
         with:
           body: ${{ steps.notes.outputs.NOTES }}
-          files: sbackup-${{ steps.version.outputs.VERSION }}-macos-${{ steps.arch.outputs.ARCH }}
-
-  # 构建 Linux 可执行文件
-  build-linux:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-
-      - name: Install dependencies
-        run: pip install nuitka py7zr tqdm zstandard paramiko minio reedsolo watchdog
-
-      - name: Extract version from tag
-        id: version
-        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
-
-      - name: Detect architecture
-        id: arch
-        run: echo "ARCH=$(uname -m)" >> $GITHUB_OUTPUT
-
-      - name: Read release notes
-        id: notes
-        run: |
-          NOTES_FILE="releases/v${{ steps.version.outputs.VERSION }}.md"
-          if [ -f "$NOTES_FILE" ]; then
-            echo "HAS_NOTES=true" >> $GITHUB_OUTPUT
-            echo "NOTES<<EOF" >> $GITHUB_OUTPUT
-            cat "$NOTES_FILE" >> $GITHUB_OUTPUT
-            echo "" >> $GITHUB_OUTPUT
-            echo "EOF" >> $GITHUB_OUTPUT
-          else
-            echo "HAS_NOTES=false" >> $GITHUB_OUTPUT
-            echo "NOTES=Release v${{ steps.version.outputs.VERSION }}" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Build executable
-        run: |
-          python -m nuitka \
-            --onefile \
-            --assume-yes-for-downloads \
-            --output-filename=sbackup-${{ steps.version.outputs.VERSION }}-linux-${{ steps.arch.outputs.ARCH }} \
-            --include-package=sbackup \
-            --include-data-dir=sbackup/locales=sbackup/locales \
-            --include-package=py7zr \
-            --include-package=tqdm \
-            --include-package=zstandard \
-            --include-package=paramiko \
-            --include-package=minio \
-            --include-package=reedsolo \
-            --include-package=watchdog \
-            main.py
-
-      - name: Upload to Release
-        uses: softprops/action-gh-release@v1
-        with:
-          body: ${{ steps.notes.outputs.NOTES }}
-          files: sbackup-${{ steps.version.outputs.VERSION }}-linux-${{ steps.arch.outputs.ARCH }}
+          files: sbackup-${{ steps.version.outputs.VERSION }}-${{ matrix.platform }}-${{ matrix.arch }}${{ matrix.ext }}
