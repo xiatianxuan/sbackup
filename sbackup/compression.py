@@ -456,7 +456,11 @@ class ZipfileCompression(BaseCompressor):
             return {"success": False, "files_count": 0, "size_mb": 0.0}
 
         zipfile_path = self._resolve_zipfile_path(folder_path)
-        if zipfile_path.exists():
+        try:
+            overwrite = zipfile_path.exists()
+        except PermissionError:
+            overwrite = False
+        if overwrite:
             print(t("warn.zip.overwrite", path=zipfile_path))
 
         files_to_compress = self._collect_files(folder_path)
@@ -604,7 +608,11 @@ class TarfileCompression(BaseCompressor):
             return {"success": False, "files_count": 0, "size_mb": 0.0}
 
         tarfile_path = self._resolve_tarfile_path(folder_path)
-        if tarfile_path.exists():
+        try:
+            overwrite = tarfile_path.exists()
+        except PermissionError:
+            overwrite = False
+        if overwrite:
             print(t("warn.zip.overwrite", path=tarfile_path))
 
         files_to_compress = self._collect_files(folder_path)
@@ -711,7 +719,11 @@ class ZstdCompression(BaseCompressor):
             return {"success": False, "files_count": 0, "size_mb": 0.0}
 
         output_path = self._resolve_path(folder_path)
-        if output_path.exists():
+        try:
+            overwrite = output_path.exists()
+        except PermissionError:
+            overwrite = False
+        if overwrite:
             print(t("warn.zip.overwrite", path=output_path))
 
         files_to_compress = self._collect_files(folder_path)
@@ -818,7 +830,11 @@ class SevenZipCompression(BaseCompressor):
             return {"success": False, "files_count": 0, "size_mb": 0.0}
 
         output_path = self._resolve_path(folder_path)
-        if output_path.exists():
+        try:
+            overwrite = output_path.exists()
+        except PermissionError:
+            overwrite = False
+        if overwrite:
             print(t("warn.zip.overwrite", path=output_path))
 
         files_to_compress = self._collect_files(folder_path)
