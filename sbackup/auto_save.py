@@ -58,6 +58,115 @@ class BackupEntry:
         )
 
 
+def _file_sha256_from_source(
+    base_path: str, rel_path: str, password: str = ""
+) -> str | None:
+    """从归档或源目录中读取文件内容并返回 SHA256。
+
+    base_path 为归档路径时从归档内提取，为目录时直接读磁盘文件。
+    """
+    import hashlib
+    import zipfile
+    import tarfile
+
+    bp = Path(base_path)
+    if bp.is_dir():
+        try:
+            # strip source_name prefix (e.g. "src/file.txt" -> "file.txt")
+            parts = rel_path.split("/", 1)
+            rel = parts[1] if len(parts) > 1 else parts[0]
+            src_file = bp / rel
+            sha = hashlib.sha256()
+            with open(src_file, "rb") as f:
+                while True:
+                    chunk = f.read(65536)
+                    if not chunk:
+                        break
+                    sha.update(chunk)
+            return sha.hexdigest()
+        except OSError:
+            return None
+
+    ext = bp.suffix.lower()
+    if ext == ".enc":
+        ext = Path(bp.stem).suffix.lower()
+    member = rel_path.replace("\\", "/")
+
+    try:
+        if ext == ".zip":
+            with zipfile.ZipFile(str(bp), "r") as zf:
+                names = zf.namelist()
+                if member not in names:
+                    for name in names:
+                        if name.endswith("/" + member) or name == member:
+                            member = name
+                            break
+                    else:
+                        return None
+                data = zf.read(member)
+        elif ext == ".7z":
+            import py7zr
+            with py7zr.SevenZipFile(str(bp), "r", password=password or None) as szf:
+                names = szf.getnames()
+                if member not in names:
+                    for name in names:
+                        if name.endswith("/" + member) or name == member:
+                            member = name
+                            break
+                    else:
+                        return None
+                result = szf.read(targets=[member])
+                data = None
+                for _an, files in result.items():
+                    for _fn, bio in files.items():
+                        data = bio.read()
+                        break
+                    break
+                if data is None:
+                    return None
+        elif ext in (".tar", ".gz", ".bz2", ".xz", ".zst", ".tgz", ".tbz2", ".txz"):
+            mode = "r"
+            if ".tar.gz" in str(bp) or ext in (".gz", ".tgz"):
+                mode = "r:gz"
+            elif ".tar.bz2" in str(bp) or ext in (".bz2", ".tbz2"):
+                mode = "r:bz2"
+            elif ".tar.xz" in str(bp) or ext in (".xz", ".txz"):
+                mode = "r:xz"
+            elif ".tar.zst" in str(bp) or ext == ".zst":
+                import zstandard
+                with open(str(bp), "rb") as fh:
+                    dctx = zstandard.ZstdDecompressor()
+                    with dctx.stream_reader(fh) as reader:
+                        with tarfile.open(fileobj=reader, mode="r|") as tf:
+                            info = None
+                            for m in tf.getmembers():
+                                mn = m.name.replace("\\", "/")
+                                if mn == member or mn.endswith("/" + member):
+                                    info = m
+                                    break
+                            if info is None:
+                                return None
+                            f = tf.extractfile(info)
+                            data = f.read() if f else b""
+                return hashlib.sha256(data).hexdigest()
+            with tarfile.open(str(bp), mode) as tf:
+                info = None
+                for m in tf.getmembers():
+                    mn = m.name.replace("\\", "/")
+                    if mn == member or mn.endswith("/" + member):
+                        info = m
+                        break
+                if info is None:
+                    return None
+                f = tf.extractfile(info)
+                data = f.read() if f else b""
+        else:
+            return None
+        return hashlib.sha256(data).hexdigest()
+    except Exception:
+        return None
+
+
 class BackupManager:
     """
     管理备份策略的类，封装状态和读写操作
@@ -251,18 +360,53 @@ class BackupManager:
         backup_file: str | None = None,
         password: str = "",
         detail: bool = False,
+        backup_file2: str | None = None,
     ) -> dict:
         """
-        对比源目录与最近一次备份的差异
-        :param source: 源文件夹路径
+        对比差异：源目录 vs 备份，或备份 vs 备份
+        :param source: 源文件夹路径（备份-vs-备份模式下为第一个备份）
         :param backup_file: 指定备份文件路径，None 则自动查找最新备份
         :param password: 解密密码
-        :return: 包含 added/removed/modified 列表的字典
+        :param detail: 是否计算行级差异
+        :param backup_file2: 第二个备份文件路径（备份-vs-备份模式）
         """
         from sbackup.compression import get_archive_member_set
 
         abs_source = os.path.abspath(source)
         entry = self._get_entry(abs_source)
+
+        # ---- archive-vs-archive 模式 ----
+        if backup_file2:
+            if not os.path.isfile(abs_source) or not os.path.isfile(backup_file2):
+                print(t("err.file.not_found", path=abs_source if not os.path.isfile(abs_source) else backup_file2))
+                return {"success": False}
+            files_a = get_archive_member_set(abs_source, password)
+            files_b = get_archive_member_set(backup_file2, password)
+            if not files_a or not files_b:
+                print(t("cmd.diff.empty_backup", path=abs_source if not files_a else backup_file2))
+                return {"success": False}
+            added = sorted(files_b - files_a)
+            removed = sorted(files_a - files_b)
+            common = files_a & files_b
+
+            modified = []
+            if common:
+                for rel_path in sorted(common):
+                    h1 = _file_sha256_from_source(abs_source, rel_path, password)
+                    h2 = _file_sha256_from_source(backup_file2, rel_path, password)
+                    if h1 and h2 and h1 != h2:
+                        modified.append(rel_path)
+
+            detail_map: dict[str, str] = {}
+            return {
+                "success": True,
+                "backup_file": abs_source,
+                "backup_file2": backup_file2,
+                "added": added,
+                "removed": removed,
+                "modified": modified,
+                "detail": detail_map,
+            }
 
         # 确定备份文件
         if backup_file:
@@ -330,20 +474,14 @@ class BackupManager:
         added = sorted(current_files - backup_files)
         removed = sorted(backup_files - current_files)
         common = current_files & backup_files
+        # SHA256 内容级修改检测
         modified = []
-        # 用备份文件的修改时间作为基准，源文件更新则视为已修改
-        backup_mtime = Path(target_backup).stat().st_mtime
-        for rel_path in sorted(common):
-            src_file = (
-                Path(abs_source) / rel_path.split("/", 1)[-1]
-                if "/" in rel_path
-                else Path(abs_source) / rel_path
-            )
-            try:
-                if src_file.is_file() and src_file.stat().st_mtime > backup_mtime:
+        if common:
+            for rel_path in sorted(common):
+                h1 = _file_sha256_from_source(target_backup, rel_path, password)
+                h2 = _file_sha256_from_source(abs_source, rel_path, password)
+                if h1 and h2 and h1 != h2:
                     modified.append(rel_path)
-            except OSError:
-                pass
 
         # 逐行差异详情
         detail_map: dict[str, str] = {}
@@ -379,7 +517,14 @@ class BackupManager:
         if not diff_result.get("success"):
             return ""
 
-        lines = [t("cmd.diff.header", backup=diff_result["backup_file"])]
+        bk2 = diff_result.get("backup_file2", "")
+        if bk2:
+            lines = [
+                t("cmd.diff.header", backup=diff_result["backup_file"])
+                + f"\n  vs {bk2}"
+            ]
+        else:
+            lines = [t("cmd.diff.header", backup=diff_result["backup_file"])]
 
         added = diff_result["added"]
         removed = diff_result["removed"]
@@ -493,19 +638,37 @@ class BackupManager:
                 print(t("warn.source.missing", path=key))
                 continue
             try:
-                current_mtime = os.stat(key).st_mtime
+                dir_mtime = os.stat(key).st_mtime
             except OSError as e:
                 print(t("err.os", error=e))
                 continue
             entry = BackupEntry.from_list(raw)
             file_meta = file_meta_all.get(key, {}) if incremental else {}
             chunk_meta = chunk_meta_all.get(key, {}) if incremental == "block" else {}
-            if entry.mtime != current_mtime:
+            # 无本地元数据 + 远端已启用 → 尝试从远端下载（换机器后继续增量）
+            if (
+                incremental == "block"
+                and not chunk_meta
+                and (sftp_upload or webdav_upload or cloud_upload)
+            ):
+                downloaded = self._download_chunk_meta_from_remote(config, key)
+                if downloaded:
+                    chunk_meta = downloaded
+                    self.data.setdefault("_chunk_meta", {})[key] = downloaded
+            # 检测策略是否需要备份：优先用文件级元数据判断，因为目录
+            # mtime 在某些文件系统/Git checkout 后不会随内容变化而更新
+            if file_meta:
+                max_file_mtime = self._get_max_file_mtime(key)
+                strategy_changed = entry.mtime != max_file_mtime
+            else:
+                strategy_changed = entry.mtime != dir_mtime
+            if strategy_changed:
+                effective_mtime = max(dir_mtime, max_file_mtime) if file_meta else dir_mtime
                 tasks.append(
                     (
                         key,
                         entry,
-                        current_mtime,
+                        effective_mtime,
                         config,
                         password,
                         name_template,
@@ -610,6 +773,11 @@ class BackupManager:
                             )
                         if incr_mode == "block":
                             self._update_chunk_meta(key)
+                            if sftp_upload or webdav_upload or cloud_upload:
+                                self._sync_chunk_meta_to_remote(
+                                    config, key,
+                                    self.data.get("_chunk_meta", {}).get(key, {}),
+                                )
                         # 文件级去重：扫描源目录并注册文件哈希
                         if dedup_store is not None:
                             try:
@@ -720,6 +888,11 @@ class BackupManager:
                         )
                     if incr_mode == "block":
                         self._update_chunk_meta(key)
+                        if sftp_upload or webdav_upload or cloud_upload:
+                            self._sync_chunk_meta_to_remote(
+                                config, key,
+                                self.data.get("_chunk_meta", {}).get(key, {}),
+                            )
                     # 文件级去重：扫描源目录并注册文件哈希
                     if dedup_store is not None:
                         try:
@@ -990,6 +1163,32 @@ class BackupManager:
         )
         # 磁盘空间检查
         BackupManager._check_disk_space(entry.target)
+
+        # 块级增量：已有元数据时构建增量归档，仅打包变化块
+        if incremental == "block" and chunk_meta:
+            result = BackupManager._build_block_incremental(
+                source_path=key,
+                target_dir=entry.target,
+                chunk_meta=chunk_meta,
+                skip_patterns=entry.skip_patterns,
+                compression_format=fmt,
+                compression_algorithm=config.compression_algorithm,
+                compression_level=config.compression_level,
+                password=password,
+                name_template=effective_template,
+                threads=threads,
+            )
+            # 分卷
+            if split_size > 0 and result.get("success") and result.get("path"):
+                from sbackup.compression import split_file
+
+                parts = split_file(result["path"], split_size)
+                if len(parts) > 1:
+                    result["parts"] = parts
+                    result["split_count"] = len(parts)
+                    logger.debug("分卷完成: %d 个分卷", len(parts))
+            return result
+
         config_instance = Config(
             folder_path=key,
             zipfile_path=entry.target,
@@ -1023,6 +1222,27 @@ class BackupManager:
                 result["split_count"] = len(parts)
                 logger.debug("分卷完成: %d 个分卷", len(parts))
         return result
+
+    @staticmethod
+    def _get_max_file_mtime(source_path: str) -> float:
+        """获取源目录中所有文件的最大 mtime（比目录 mtime 更可靠）。
+
+        目录 mtime 在部分文件系统上不会随内部文件变更而更新，
+        导致策略级检测误判为"未变化"而跳过备份。
+        """
+        max_mtime = 0.0
+        try:
+            for dirpath, _, filenames in os.walk(source_path):
+                for fn in filenames:
+                    try:
+                        mtime = os.stat(os.path.join(dirpath, fn)).st_mtime
+                        if mtime > max_mtime:
+                            max_mtime = mtime
+                    except OSError:
+                        pass
+        except OSError:
+            pass
+        return max_mtime
 
     @staticmethod
     def _collect_file_meta(
@@ -1088,6 +1308,272 @@ class BackupManager:
                         pass
         except OSError:
             pass
+
+    @staticmethod
+    def _sync_chunk_meta_to_remote(config, key: str, chunk_meta: dict) -> None:
+        """上传 chunk_meta 到远端，使得其他机器也能基于它做增量备份。"""
+        import json as _json
+
+        if not chunk_meta:
+            return
+        meta_bytes = _json.dumps(
+            {"source": key, "chunk_meta": chunk_meta},
+            ensure_ascii=False,
+        ).encode("utf-8")
+        remote_name = "_sbackup_chunk_meta.json"
+
+        errors = []
+        if config.sftp_enabled and config.sftp_host:
+            try:
+                BackupManager._upload_bytes_to_sftp(meta_bytes, remote_name, config)
+            except Exception as e:
+                errors.append(f"sftp: {e}")
+        if config.webdav_enabled and config.webdav_url:
+            try:
+                BackupManager._upload_bytes_to_webdav(meta_bytes, remote_name, config)
+            except Exception as e:
+                errors.append(f"webdav: {e}")
+        if config.cloud_enabled and config.cloud_endpoint:
+            try:
+                BackupManager._upload_bytes_to_cloud(meta_bytes, remote_name, config)
+            except Exception as e:
+                errors.append(f"cloud: {e}")
+        if errors:
+            logger.debug("Remote chunk_meta sync errors: %s", "; ".join(errors))
+
+    @staticmethod
+    def _download_chunk_meta_from_remote(config, key: str) -> dict[str, dict[str, str]] | None:
+        """尝试从远端下载 chunk_meta（换机器后继续增量备份）。"""
+        import json as _json
+
+        remote_name = "_sbackup_chunk_meta.json"
+
+        for try_backend in [
+            (config.sftp_enabled and config.sftp_host, "sftp"),
+            (config.webdav_enabled and config.webdav_url, "webdav"),
+            (config.cloud_enabled and config.cloud_endpoint, "cloud"),
+        ]:
+            enabled, backend = try_backend
+            if not enabled:
+                continue
+            try:
+                if backend == "sftp":
+                    data = BackupManager._download_bytes_from_sftp(remote_name, config)
+                elif backend == "webdav":
+                    data = BackupManager._download_bytes_from_webdav(
+                        remote_name, config
+                    )
+                else:
+                    data = BackupManager._download_bytes_from_cloud(
+                        remote_name, config
+                    )
+                if data:
+                    loaded = _json.loads(data.decode("utf-8"))
+                    if loaded.get("source") == key:
+                        return loaded.get("chunk_meta", {})
+            except Exception:
+                continue
+        return None
+
+    @staticmethod
+    def _build_block_incremental(
+        source_path: str,
+        target_dir: str,
+        chunk_meta: dict[str, dict[str, str]],
+        skip_patterns: list[str],
+        compression_format: str,
+        compression_algorithm: str,
+        compression_level: int,
+        password: str,
+        name_template: str,
+        threads: int,
+    ) -> dict:
+        """构建块级增量备份归档。
+
+        对每个文件计算当前块哈希，与存储的 chunk_meta 对比：
+        - 新文件/变化超过阈值 → 完整文件
+        - 部分变化 → 仅写入变化块补丁（.sbackup_patch）
+        - 无变化 → 跳过
+        归档内含 _sbackup_manifest.json 供还原时合并。
+
+        :returns: 与 compress() 兼容的 result dict
+        """
+        from sbackup.chunked_backup import (
+            compute_chunk_hashes,
+            find_changed_chunks,
+            create_patch,
+            should_do_full_backup,
+        )
+        from sbackup.compression import (
+            create_compressor as _create_compressor,
+        )
+        import json as _json
+
+        source = Path(source_path).resolve()
+        source_name = source.name
+        target = Path(target_dir)
+
+        if not source.is_dir():
+            return {"success": False, "files_count": 0, "size_mb": 0.0}
+
+        # 收集文件列表（复用忽略规则）
+        extra_ignore = []
+        ignore_file = source / ".sbackupignore"
+        if ignore_file.is_file():
+            try:
+                extra_ignore = [
+                    l.strip()
+                    for l in ignore_file.read_text("utf-8").splitlines()
+                    if l.strip() and not l.strip().startswith("#")
+                ]
+            except OSError:
+                pass
+
+        all_patterns = skip_patterns + extra_ignore
+
+        def _should_ignore(rel: str) -> bool:
+            from fnmatch import fnmatch as _fnmatch
+
+            basename = os.path.basename(rel)
+            for pat in all_patterns:
+                if pat.startswith("!"):
+                    continue
+                if _fnmatch(rel, pat) or _fnmatch(basename, pat):
+                    return True
+            return False
+
+        # 构建临时目录
+        import tempfile as _tmp
+
+        tmp_dir = _tmp.mkdtemp(prefix="sbackup_incr_")
+        try:
+            tmp_source = Path(tmp_dir) / source_name
+            tmp_source.mkdir()
+
+            manifest: dict = {
+                "version": 1,
+                "type": "incremental",
+                "chunk_size": 65536,
+                "full_files": [],
+                "patches": {},
+                "deleted_files": [],
+                "base_archive": "",
+            }
+
+            total_full = 0
+            total_patch = 0
+            total_skipped = 0
+
+            for dirpath, dirnames, filenames in os.walk(source):
+                rel_dir = os.path.relpath(dirpath, source)
+                if rel_dir == ".":
+                    rel_dir = ""
+
+                # 过滤目录
+                dirnames[:] = [
+                    d
+                    for d in dirnames
+                    if not _should_ignore(
+                        os.path.join(rel_dir, d).replace("\\", "/") if rel_dir else d
+                    )
+                ]
+
+                for fn in filenames:
+                    file_rel = (
+                        os.path.join(rel_dir, fn).replace("\\", "/")
+                        if rel_dir
+                        else fn
+                    )
+                    if _should_ignore(file_rel):
+                        continue
+
+                    fp = os.path.join(dirpath, fn)
+                    try:
+                        if not os.path.isfile(fp):
+                            continue
+                    except OSError:
+                        continue
+
+                    stored = chunk_meta.get(file_rel, {})
+                    if not stored:
+                        # 新文件 → 完整备份
+                        total_full += 1
+                        dest = tmp_source / file_rel
+                        dest.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(fp, str(dest))
+                        manifest["full_files"].append(file_rel)
+                        continue
+
+                    try:
+                        changed_indices, total_chunks = find_changed_chunks(fp, stored)
+                    except OSError:
+                        continue
+
+                    if not changed_indices:
+                        total_skipped += 1
+                        continue
+
+                    if should_do_full_backup(fp, changed_indices):
+                        total_full += 1
+                        dest = tmp_source / file_rel
+                        dest.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(fp, str(dest))
+                        manifest["full_files"].append(file_rel)
+                    else:
+                        # 部分变化 → 补丁
+                        total_patch += 1
+                        patch_rel = file_rel + ".sbackup_patch"
+                        patch_path = tmp_source / patch_rel
+                        patch_path.parent.mkdir(parents=True, exist_ok=True)
+                        create_patch(fp, changed_indices, str(patch_path))
+                        manifest["patches"][file_rel] = {
+                            "original_blocks": total_chunks,
+                            "changed_blocks": sorted(changed_indices),
+                        }
+
+            # 检查删除的文件（在 chunk_meta 中存在但源目录中不存在）
+            for file_rel in chunk_meta:
+                fp = source / file_rel
+                try:
+                    if not fp.exists():
+                        manifest["deleted_files"].append(file_rel)
+                except OSError:
+                    pass
+
+            # 写入 manifest
+            manifest_path = tmp_source / "_sbackup_manifest.json"
+            manifest_path.write_text(
+                _json.dumps(manifest, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+
+            if total_full == 0 and total_patch == 0 and not manifest["deleted_files"]:
+                return {"success": True, "files_count": 0, "size_mb": 0.0}
+
+            # 使用标准压缩器打包（以 tmp_source 为根，确保归档内路径为 source_name/...）
+            cfg = Config(
+                folder_path=str(tmp_source),
+                zipfile_path=str(target),
+                skip_patterns=[],
+                compression_format=compression_format,
+                compression_algorithm=compression_algorithm,
+                compression_level=compression_level,
+                password=password,
+                name_template=name_template,
+                threads=threads,
+            )
+            result = _create_compressor(cfg).compress()
+
+            # 非 7z 格式 + 有密码 → 加密
+            if result.get("success") and password and compression_format != "7Z":
+                from sbackup.compression import _encrypt_file as _enc
+
+                encrypted_path = _enc(result["path"], password)
+                result["path"] = encrypted_path
+
+            return result
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
 
     @staticmethod
     def _check_disk_space(target_dir: str, min_ratio: float = 0.05) -> None:
@@ -1536,37 +2022,34 @@ class BackupManager:
         """将备份文件上传到 S3 兼容云存储"""
         from concurrent.futures import ThreadPoolExecutor, as_completed
         from sbackup.cloud_storage import CloudStorageClient, CloudStorageError
+        from sbackup.retry import retry_call
 
-        cloud_config = getattr(config, "cloud", None) or {}
-        if not cloud_config or not cloud_config.get("enabled"):
+        if not config.cloud_enabled or not config.cloud_endpoint or not config.cloud_bucket:
             print(t("err.cloud.not_configured"))
             return
 
-        endpoint = cloud_config.get("endpoint", "")
-        access_key = cloud_config.get("access_key", "")
-        secret_key = cloud_config.get("secret_key", "")
-        bucket = cloud_config.get("bucket", "")
-        region = cloud_config.get("region", "")
-        secure = cloud_config.get("secure", True)
-        remote_path_prefix = cloud_config.get("remote_path", "/")
+        endpoint = config.cloud_endpoint
+        access_key = config.cloud_access_key
+        secret_key = config.cloud_secret_key
+        bucket = config.cloud_bucket
+        region = config.cloud_region or None
+        secure = config.cloud_secure
+        remote_path_prefix = config.cloud_remote_path or "/"
 
-        if not endpoint or not bucket:
-            print(t("err.cloud.not_configured"))
-            return
+        def _do_cloud_upload(local_path: str) -> None:
+            """实际执行云上传（可被 retry_call 包裹）"""
+            filename = os.path.basename(local_path)
+            with CloudStorageClient(
+                endpoint, access_key, secret_key, bucket,
+                region=region, secure=secure,
+            ) as client:
+                remote_path = remote_path_prefix.rstrip("/") + "/" + filename
+                client.upload_file(local_path, remote_path.lstrip("/"))
 
         def _upload_single(local_path: str) -> tuple[str, bool, str]:
             filename = os.path.basename(local_path)
             try:
-                with CloudStorageClient(
-                    endpoint,
-                    access_key,
-                    secret_key,
-                    bucket,
-                    region=region,
-                    secure=secure,
-                ) as client:
-                    remote_path = remote_path_prefix.rstrip("/") + "/" + filename
-                    client.upload_file(local_path, remote_path.lstrip("/"))
+                retry_call(_do_cloud_upload, local_path)
                 return filename, True, ""
             except (CloudStorageError, Exception) as e:
                 return filename, False, str(e)
@@ -1590,6 +2073,116 @@ class BackupManager:
                         print(t("cmd.cloud.success", file=filename))
                     else:
                         print(error)
+
+    # ---- 远端 chunk_meta 字节级传输辅助方法 ----
+
+    @staticmethod
+    def _upload_bytes_to_sftp(data: bytes, filename: str, config: Config) -> None:
+        from io import BytesIO
+        from sbackup.sftp import SFTPClient
+
+        key_file = config.sftp_key_file
+        key_passphrase = config.sftp_key_passphrase
+        password = config.sftp_password
+        if not key_file and not password:
+            default_key = SFTPClient.try_default_key()
+            if default_key:
+                key_file = default_key
+                key_passphrase = SFTPClient.resolve_key_passphrase(default_key) or ""
+
+        with SFTPClient(
+            config.sftp_host, config.sftp_port, config.sftp_user,
+            password, key_file, key_passphrase,
+        ) as client:
+            remote_path = config.sftp_remote_path.rstrip("/") + "/" + filename
+            client.connect()
+            client.sftp.putfo(BytesIO(data), remote_path)
+
+    @staticmethod
+    def _download_bytes_from_sftp(filename: str, config: Config) -> bytes | None:
+        from io import BytesIO
+        from sbackup.sftp import SFTPClient
+
+        key_file = config.sftp_key_file
+        key_passphrase = config.sftp_key_passphrase
+        password = config.sftp_password
+        if not key_file and not password:
+            default_key = SFTPClient.try_default_key()
+            if default_key:
+                key_file = default_key
+                key_passphrase = SFTPClient.resolve_key_passphrase(default_key) or ""
+
+        with SFTPClient(
+            config.sftp_host, config.sftp_port, config.sftp_user,
+            password, key_file, key_passphrase,
+        ) as client:
+            remote_path = config.sftp_remote_path.rstrip("/") + "/" + filename
+            client.connect()
+            buf = BytesIO()
+            client.sftp.getfo(remote_path, buf)
+            return buf.getvalue()
+
+    @staticmethod
+    def _upload_bytes_to_webdav(data: bytes, filename: str, config: Config) -> None:
+        from sbackup.webdav import WebDAVClient
+        from urllib.request import Request
+        from urllib.request import urlopen
+
+        remote_path = config.webdav_remote_path.rstrip("/") + "/" + filename
+        client = WebDAVClient(config.webdav_url, config.webdav_user, config.webdav_password)
+        client.connect()
+        req = Request(remote_path, data=data, method="PUT")
+        req.add_header("Content-Type", "application/octet-stream")
+        auth = client._auth_header
+        if auth:
+            req.add_header("Authorization", auth)
+        urlopen(req, timeout=30)
+
+    @staticmethod
+    def _download_bytes_from_webdav(filename: str, config: Config) -> bytes | None:
+        from urllib.request import Request, urlopen
+
+        remote_path = config.webdav_remote_path.rstrip("/") + "/" + filename
+        from sbackup.webdav import WebDAVClient
+        client = WebDAVClient(config.webdav_url, config.webdav_user, config.webdav_password)
+        req = Request(remote_path, method="GET")
+        auth = client._auth_header
+        if auth:
+            req.add_header("Authorization", auth)
+        resp = urlopen(req, timeout=30)
+        return resp.read()
+
+    @staticmethod
+    def _upload_bytes_to_cloud(data: bytes, filename: str, config: Config) -> None:
+        from io import BytesIO
+        from sbackup.cloud_storage import CloudStorageClient
+
+        remote_path = (config.cloud_remote_path or "/").rstrip("/") + "/" + filename
+        with CloudStorageClient(
+            config.cloud_endpoint, config.cloud_access_key,
+            config.cloud_secret_key, config.cloud_bucket,
+            region=config.cloud_region or None, secure=config.cloud_secure,
+        ) as client:
+            client.client.put_object(
+                config.cloud_bucket,
+                remote_path.lstrip("/"),
+                BytesIO(data),
+                len(data),
+            )
+
+    @staticmethod
+    def _download_bytes_from_cloud(filename: str, config: Config) -> bytes | None:
+        from sbackup.cloud_storage import CloudStorageClient
+
+        remote_path = (config.cloud_remote_path or "/").rstrip("/") + "/" + filename
+        with CloudStorageClient(
+            config.cloud_endpoint, config.cloud_access_key,
+            config.cloud_secret_key, config.cloud_bucket,
+            region=config.cloud_region or None, secure=config.cloud_secure,
+        ) as client:
+            return client.client.get_object(
+                config.cloud_bucket, remote_path.lstrip("/")
+            ).read()
 
     def _add_history(
         self,

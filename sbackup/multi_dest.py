@@ -48,7 +48,15 @@ class MultiDestBackup:
             destinations.append("cloud")
         return destinations
 
-    def backup_to_local(self, source_path: str, backup_path: str) -> DestResult:
+    def backup_to_local(
+        self,
+        source_path: str,
+        backup_path: str,
+        incremental: str | None = None,
+        checksum: bool = False,
+        file_metadata: dict | None = None,
+        chunk_meta: dict | None = None,
+    ) -> DestResult:
         """执行本地备份（调用 BackupManager）
         :param source_path: 源文件夹路径
         :param backup_path: 本地备份目标文件夹路径
@@ -69,20 +77,39 @@ class MultiDestBackup:
 
             os.makedirs(abs_dest, exist_ok=True)
 
-            # 构建 Config 用于压缩
-            compress_config = Config(
-                folder_path=abs_source,
-                skip_patterns=self.config.skip_patterns,
-                compression_format=self.config.compression_format,
-                compression_algorithm=self.config.compression_algorithm,
-                compression_level=self.config.compression_level,
-                password=self.config.password,
-                follow_symlinks=self.config.follow_symlinks,
-                name_template=self.config.name_template,
-            )
+            # 块级增量：已有元数据时构建增量归档，仅打包变化块
+            if incremental == "block" and chunk_meta:
+                from sbackup.auto_save import BackupManager
 
-            compressor = create_compressor(compress_config)
-            result = compressor.compress()
+                result = BackupManager._build_block_incremental(
+                    source_path=abs_source,
+                    target_dir=abs_dest,
+                    chunk_meta=chunk_meta,
+                    skip_patterns=self.config.skip_patterns,
+                    compression_format=self.config.compression_format,
+                    compression_algorithm=self.config.compression_algorithm,
+                    compression_level=self.config.compression_level,
+                    password=self.config.password or "",
+                    name_template=self.config.name_template or "",
+                    threads=getattr(self.config, "threads", 1),
+                )
+            else:
+                # 构建 Config 用于压缩
+                compress_config = Config(
+                    folder_path=abs_source,
+                    skip_patterns=self.config.skip_patterns,
+                    compression_format=self.config.compression_format,
+                    compression_algorithm=self.config.compression_algorithm,
+                    compression_level=self.config.compression_level,
+                    password=self.config.password,
+                    follow_symlinks=self.config.follow_symlinks,
+                    name_template=self.config.name_template,
+                    # 文件级增量元数据
+                    file_metadata=file_metadata or {},
+                )
+
+                compressor = create_compressor(compress_config)
+                result = compressor.compress()
 
             elapsed = time.monotonic() - start
 
@@ -283,7 +310,15 @@ class MultiDestBackup:
                 duration=elapsed,
             )
 
-    def execute_all(self, source_path: str, backup_path: str) -> list[DestResult]:
+    def execute_all(
+        self,
+        source_path: str,
+        backup_path: str,
+        incremental: str | None = None,
+        checksum: bool = False,
+        file_metadata: dict | None = None,
+        chunk_meta: dict | None = None,
+    ) -> list[DestResult]:
         """并行执行所有目标的备份/上传
         1. 先执行本地备份（必须成功）
         2. 如果本地成功，并行上传到所有启用的远程目标
@@ -294,7 +329,13 @@ class MultiDestBackup:
         destinations = self.get_enabled_destinations()
 
         # Step 1: 执行本地备份
-        local_result = self.backup_to_local(source_path, backup_path)
+        local_result = self.backup_to_local(
+            source_path, backup_path,
+            incremental=incremental,
+            checksum=checksum,
+            file_metadata=file_metadata,
+            chunk_meta=chunk_meta,
+        )
         self.results.append(local_result)
 
         if not local_result.success:

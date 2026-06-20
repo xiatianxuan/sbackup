@@ -225,6 +225,8 @@ class BaseCompressor:
         self.exclude_patterns: list[str] = config.exclude_patterns
         self.threads: int = config.threads
         self.compression_level: int | None = None
+        # checksum 模式下缓存文件内容，避免压缩阶段二次读取
+        self._file_cache: dict[str, bytes] = {}
 
     def _load_ignore_file(self, folder_path: Path) -> list[str]:
         """从源目录的 .sbackupignore 文件加载忽略规则"""
@@ -364,18 +366,22 @@ class BaseCompressor:
                                 prev = self.file_metadata.get(file_rel)
                                 if prev is not None:
                                     if isinstance(prev, str) and len(prev) == 64:
-                                        # 校验和模式：比较 SHA256
+                                        # 校验和模式：比较 SHA256（缓存文件内容）
                                         import hashlib
 
                                         sha = hashlib.sha256()
+                                        data_chunks: list[bytes] = []
                                         with open(file_path, "rb") as f:
                                             while True:
                                                 chunk = f.read(65536)
                                                 if not chunk:
                                                     break
                                                 sha.update(chunk)
+                                                data_chunks.append(chunk)
                                         if prev == sha.hexdigest():
                                             continue
+                                        # 文件已变化，缓存内容避免压缩阶段二次读取
+                                        self._file_cache[file_rel] = b"".join(data_chunks)
                                     elif isinstance(prev, list) and len(prev) >= 2:
                                         # 元数据模式：比较 mtime + size
                                         if (
@@ -481,6 +487,7 @@ class ZipfileCompression(BaseCompressor):
             if self.threads > 1 and files_to_compress:
                 file_data: list[tuple[str, bytes]] = []
                 lock = threading.Lock()
+                _cache = self._file_cache
 
                 def _read_file(dirpath: str, filename: str) -> None:
                     fpath = Path(dirpath) / filename
@@ -488,7 +495,15 @@ class ZipfileCompression(BaseCompressor):
                         folder_path.name / fpath.relative_to(folder_path)
                     ).replace("\\", "/")
                     try:
-                        data = fpath.read_bytes()
+                        rel_dir = os.path.relpath(dirpath, folder_path)
+                        if rel_dir == ".":
+                            rel_dir = ""
+                        file_rel = (
+                            os.path.join(rel_dir, filename).replace("\\", "/")
+                            if rel_dir
+                            else filename
+                        )
+                        data = _cache.get(file_rel) or fpath.read_bytes()
                         with lock:
                             file_data.append((arcname, data))
                     except OSError:
@@ -526,7 +541,19 @@ class ZipfileCompression(BaseCompressor):
                             ).replace("\\", "/")
                             pbar.set_description(filename)
                             try:
-                                zipf.write(file_path, arcname)
+                                rel_dir = os.path.relpath(dirpath, folder_path)
+                                if rel_dir == ".":
+                                    rel_dir = ""
+                                file_rel = (
+                                    os.path.join(rel_dir, filename).replace("\\", "/")
+                                    if rel_dir
+                                    else filename
+                                )
+                                cached = self._file_cache.get(file_rel)
+                                if cached is not None:
+                                    zipf.writestr(arcname, cached)
+                                else:
+                                    zipf.write(file_path, arcname)
                                 pbar.update(1)
                                 files_count += 1
                             except (FileNotFoundError, PermissionError):
@@ -643,7 +670,23 @@ class TarfileCompression(BaseCompressor):
                         ).replace("\\", "/")
                         pbar.set_description(filename)
                         try:
-                            tarf.add(file_path, arcname=arcname, recursive=False)
+                            rel_dir = os.path.relpath(dirpath, folder_path)
+                            if rel_dir == ".":
+                                rel_dir = ""
+                            file_rel = (
+                                os.path.join(rel_dir, filename).replace("\\", "/")
+                                if rel_dir
+                                else filename
+                            )
+                            cached = self._file_cache.get(file_rel)
+                            if cached is not None:
+                                from io import BytesIO
+
+                                info = tarfile.TarInfo(name=arcname)
+                                info.size = len(cached)
+                                tarf.addfile(info, BytesIO(cached))
+                            else:
+                                tarf.add(file_path, arcname=arcname, recursive=False)
                             pbar.update(1)
                             files_count += 1
                         except (FileNotFoundError, PermissionError):
@@ -752,7 +795,23 @@ class ZstdCompression(BaseCompressor):
                             ).replace("\\", "/")
                             pbar.set_description(filename)
                             try:
-                                tarf.add(file_path, arcname=arcname, recursive=False)
+                                rel_dir = os.path.relpath(dirpath, folder_path)
+                                if rel_dir == ".":
+                                    rel_dir = ""
+                                file_rel = (
+                                    os.path.join(rel_dir, filename).replace("\\", "/")
+                                    if rel_dir
+                                    else filename
+                                )
+                                cached = self._file_cache.get(file_rel)
+                                if cached is not None:
+                                    from io import BytesIO
+
+                                    info = tarfile.TarInfo(name=arcname)
+                                    info.size = len(cached)
+                                    tarf.addfile(info, BytesIO(cached))
+                                else:
+                                    tarf.add(file_path, arcname=arcname, recursive=False)
                                 pbar.update(1)
                                 files_count += 1
                             except (FileNotFoundError, PermissionError):
@@ -864,7 +923,20 @@ class SevenZipCompression(BaseCompressor):
                         ).replace("\\", "/")
                         pbar.set_description(filename)
                         try:
-                            szf.write(file_path, arcname)
+                            rel_dir = os.path.relpath(dirpath, folder_path)
+                            if rel_dir == ".":
+                                rel_dir = ""
+                            file_rel = (
+                                os.path.join(rel_dir, filename).replace("\\", "/")
+                                if rel_dir
+                                else filename
+                            )
+                            cached = self._file_cache.get(file_rel)
+                            if cached is not None:
+                                from io import BytesIO
+                                szf.writef(BytesIO(cached), arcname)
+                            else:
+                                szf.write(file_path, arcname)
                             pbar.update(1)
                             files_count += 1
                         except (FileNotFoundError, PermissionError):
@@ -1000,6 +1072,192 @@ def _safe_extract_tar(
             extra_args["filter"] = "data"
         tarf.extract(member, path=str(target), **extra_args)
     return skipped_count
+
+
+def _apply_incremental_manifest(extract_dir: Path, backup_dir: Path) -> int:
+    """检测并应用增量备份的 manifest，合并补丁到已提取的文件。
+
+    在归档已提取到 extract_dir 后调用。如果存在
+    <source_name>/_sbackup_manifest.json，读取并：
+    1. 对 patches 中的每个文件，将 .sbackup_patch 合并到基础文件
+    2. 对 deleted_files 中的文件，从目标目录删除
+    3. 删除 manifest 和 patch 文件
+
+    :returns: 应用成功的补丁数
+    """
+    import json as _json
+
+    # 查找 manifest（extract_dir 内任意子目录）
+    manifest_path = None
+    source_root: Path | None = None
+    for candidate in extract_dir.rglob("_sbackup_manifest.json"):
+        manifest_path = candidate
+        source_root = candidate.parent
+        break
+
+    if manifest_path is None:
+        return 0
+
+    try:
+        manifest = _json.loads(manifest_path.read_text("utf-8"))
+    except (OSError, _json.JSONDecodeError):
+        return 0
+
+    if manifest.get("type") != "incremental":
+        return 0
+
+    applied = 0
+
+    # 处理补丁（路径相对于 source_root）
+    skipped_patches = 0
+    for file_path, patch_info in manifest.get("patches", {}).items():
+        patch_rel = file_path + ".sbackup_patch"
+        patch_file = source_root / patch_rel if source_root else None
+        target_file = source_root / file_path if source_root else None
+
+        if patch_file and patch_file.exists():
+            if not target_file.exists():
+                # 基础文件不存在；需要先从全量备份中提取
+                skipped_patches += 1
+                logger.warning(
+                    "增量补丁缺少基础文件 %s，请先还原全量备份后再应用此增量归档",
+                    file_path,
+                )
+                continue
+            tmp_output = target_file.with_suffix(target_file.suffix + ".tmp")
+            try:
+                from sbackup.chunked_backup import apply_patch as _apply_patch
+
+                if _apply_patch(str(target_file), str(patch_file), str(tmp_output)):
+                    os.replace(str(tmp_output), str(target_file))
+                    applied += 1
+                elif tmp_output.exists():
+                    os.remove(str(tmp_output))
+            except OSError:
+                if tmp_output.exists():
+                    try:
+                        os.remove(str(tmp_output))
+                    except OSError:
+                        pass
+            # 清理补丁文件
+            try:
+                os.remove(str(patch_file))
+            except OSError:
+                pass
+
+    # 处理删除的文件（路径相对于 source_root）
+    for file_path in manifest.get("deleted_files", []):
+        target_file = (source_root or extract_dir) / file_path
+        try:
+            if target_file.exists():
+                os.remove(str(target_file))
+        except OSError:
+            pass
+
+    # 清理 manifest
+    try:
+        os.remove(str(manifest_path))
+    except OSError:
+        pass
+
+    return applied
+
+
+def download_remote_backup(
+    filename: str,
+    config: "Config",
+    backend: str,
+) -> str | None:
+    """从远端存储下载备份文件到临时文件
+
+    :param filename: 远端文件名
+    :param config: 配置对象（含远端连接信息）
+    :param backend: 后端类型 "sftp" | "webdav" | "cloud"
+    :return: 临时文件路径，失败返回 None
+    """
+    import tempfile as _tmp
+
+    suffix = os.path.splitext(filename)[1] or ".zip"
+    fd, tmp_path = _tmp.mkstemp(suffix=suffix)
+    os.close(fd)
+
+    try:
+        if backend == "sftp":
+            _download_from_sftp(filename, tmp_path, config)
+        elif backend == "webdav":
+            _download_from_webdav(filename, tmp_path, config)
+        elif backend == "cloud":
+            _download_from_cloud(filename, tmp_path, config)
+        else:
+            os.remove(tmp_path)
+            return None
+
+        if os.path.getsize(tmp_path) == 0:
+            os.remove(tmp_path)
+            return None
+
+        logger.info("远端备份已下载到: %s (%d bytes)", tmp_path, os.path.getsize(tmp_path))
+        return tmp_path
+    except Exception as e:
+        logger.error("远端下载失败: %s", e)
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+        return None
+
+
+def _download_from_sftp(filename: str, local_path: str, config: "Config") -> None:
+    from sbackup.sftp import SFTPClient
+
+    key_file = config.sftp_key_file
+    key_passphrase = config.sftp_key_passphrase
+    password = config.sftp_password
+    if not key_file and not password:
+        default_key = SFTPClient.try_default_key()
+        if default_key:
+            key_file = default_key
+            key_passphrase = SFTPClient.resolve_key_passphrase(default_key) or ""
+
+    with SFTPClient(
+        config.sftp_host, config.sftp_port, config.sftp_user,
+        password, key_file, key_passphrase,
+    ) as client:
+        remote_path = config.sftp_remote_path.rstrip("/") + "/" + filename
+        client.connect()
+        client.sftp.get(remote_path, local_path)
+
+
+def _download_from_webdav(filename: str, local_path: str, config: "Config") -> None:
+    from urllib.request import Request, urlopen
+    from sbackup.webdav import WebDAVClient
+
+    remote_path = config.webdav_remote_path.rstrip("/") + "/" + filename
+    client = WebDAVClient(config.webdav_url, config.webdav_user, config.webdav_password)
+    req = Request(client._build_url(remote_path.lstrip("/")), method="GET")
+    auth = client._auth_header
+    if auth:
+        req.add_header("Authorization", auth)
+    with urlopen(req, timeout=60) as resp:
+        with open(local_path, "wb") as f:
+            while True:
+                chunk = resp.read(65536)
+                if not chunk:
+                    break
+                f.write(chunk)
+
+
+def _download_from_cloud(filename: str, local_path: str, config: "Config") -> None:
+    from sbackup.cloud_storage import CloudStorageClient
+
+    remote_path = (config.cloud_remote_path or "/").rstrip("/") + "/" + filename
+    with CloudStorageClient(
+        config.cloud_endpoint, config.cloud_access_key,
+        config.cloud_secret_key, config.cloud_bucket,
+        region=config.cloud_region or None, secure=config.cloud_secure,
+    ) as client:
+        client.download_file(remote_path.lstrip("/"), local_path)
 
 
 def restore_backup(
@@ -1245,6 +1503,12 @@ def restore_backup(
             print(t("err.unknown", error=e))
         return {"success": False, "files_count": 0}
     finally:
+        # 增量备份后处理：检测并应用补丁 manifest
+        if target.exists():
+            try:
+                _apply_incremental_manifest(target, backup.parent)
+            except Exception:
+                pass
         if tmp_decrypted and os.path.exists(tmp_decrypted):
             os.remove(tmp_decrypted)
         if tmp_merged and os.path.exists(tmp_merged):
@@ -1476,6 +1740,146 @@ def get_archive_member_set(backup_path: str, password: str = "") -> set[str]:
         }
     except Exception:
         return set()
+
+
+def get_diff_detail(
+    source_path: str, archive_path: str, archive_member: str, password: str = ""
+) -> str:
+    """获取单个文件的行级差异（统一 diff 格式）。
+
+    从归档中读取 archive_member 的内容，与磁盘上的 source_path
+    逐行比较，返回 unified diff 文本。二进制文件返回空字符串。
+
+    :param source_path: 磁盘上的源文件路径
+    :param archive_path: 备份归档路径
+    :param archive_member: 归档内的文件路径
+    :param password: 加密密码
+    :return: unified diff 文本，或空字符串（无差异/二进制/不可读）
+    """
+    import difflib
+    import zipfile
+    import tarfile
+    import io
+
+    # 读取归档中的文件内容
+    old_lines: list[str] | None = None
+    archive = Path(archive_path)
+    ext = archive.suffix.lower()
+    if ext == ".enc":
+        ext = Path(archive.stem).suffix.lower()
+
+    try:
+        if ext == ".zip":
+            with zipfile.ZipFile(archive_path, "r") as zf:
+                # 规范化路径分隔符
+                member = archive_member.replace("\\", "/")
+                if member not in zf.namelist():
+                    # 尝试去掉前缀匹配
+                    for name in zf.namelist():
+                        if name.endswith("/" + member) or name == member:
+                            member = name
+                            break
+                    else:
+                        return ""
+                data = zf.read(member)
+        elif ext == ".7z":
+            import py7zr
+            with py7zr.SevenZipFile(archive_path, "r", password=password or None) as szf:
+                member = archive_member.replace("\\", "/")
+                names = szf.getnames()
+                if member not in names:
+                    for name in names:
+                        if name.endswith("/" + member) or name == member:
+                            member = name
+                            break
+                    else:
+                        return ""
+                result = szf.read(targets=[member])
+                # result is dict[str, dict[str, BytesIO]]
+                for archive_name, files in result.items():
+                    for fn, bio in files.items():
+                        data = bio.read()
+                        break
+                    break
+                else:
+                    return ""
+        elif ext in (".tar", ".gz", ".bz2", ".xz", ".zst", ".tgz", ".tbz2", ".txz"):
+            mode = "r"
+            if ext == ".gz" or archive.suffix == ".gz" or ".tar.gz" in archive_path:
+                mode = "r:gz"
+            elif ext == ".bz2" or ".tar.bz2" in archive_path:
+                mode = "r:bz2"
+            elif ext == ".xz" or ".tar.xz" in archive_path:
+                mode = "r:xz"
+            elif ext == ".zst" or ".tar.zst" in archive_path:
+                import zstandard
+                with open(archive_path, "rb") as fh:
+                    dctx = zstandard.ZstdDecompressor()
+                    with dctx.stream_reader(fh) as reader:
+                        with tarfile.open(fileobj=reader, mode="r|") as tf:
+                            member = archive_member.replace("\\", "/")
+                            info = None
+                            for m in tf.getmembers():
+                                if m.name.replace("\\", "/") == member or m.name.endswith("/" + member):
+                                    info = m
+                                    break
+                            if info is None:
+                                return ""
+                            f = tf.extractfile(info)
+                            data = f.read() if f else b""
+                return _compute_unified_diff(data, source_path)
+            with tarfile.open(archive_path, mode) as tf:
+                member = archive_member.replace("\\", "/")
+                info = None
+                for m in tf.getmembers():
+                    if m.name.replace("\\", "/") == member or m.name.endswith("/" + member):
+                        info = m
+                        break
+                if info is None:
+                    return ""
+                f = tf.extractfile(info)
+                data = f.read() if f else b""
+        else:
+            return ""
+    except Exception:
+        return ""
+
+    return _compute_unified_diff(data, source_path)
+
+
+def _compute_unified_diff(old_data: bytes, source_path: str) -> str:
+    """计算旧内容（bytes）与磁盘文件之间的 unified diff。"""
+    import difflib
+
+    try:
+        old_text = old_data.decode("utf-8")
+    except UnicodeDecodeError:
+        try:
+            old_text = old_data.decode("latin-1")
+        except UnicodeDecodeError:
+            return ""  # 二进制文件
+
+    try:
+        new_text = Path(source_path).read_text("utf-8")
+    except (UnicodeDecodeError, OSError):
+        return ""
+
+    old_lines = old_text.replace("\r\n", "\n").split("\n")
+    new_lines = new_text.replace("\r\n", "\n").split("\n")
+
+    if old_lines == new_lines:
+        return ""
+
+    diff_lines = list(
+        difflib.unified_diff(
+            old_lines,
+            new_lines,
+            fromfile=f"a/{os.path.basename(source_path)}",
+            tofile=f"b/{os.path.basename(source_path)}",
+            lineterm="",
+        )
+    )
+    return "\n".join(diff_lines) + "\n" if diff_lines else ""
 
 
 def search_in_backup(backup_path: str, pattern: str, password: str = "") -> list[str]:

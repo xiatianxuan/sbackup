@@ -417,6 +417,24 @@ def get_parser() -> argparse.ArgumentParser:
         default=False,
         help=t("cli.help.restore.stats"),
     )
+    restore_parser.add_argument(
+        "--sftp",
+        action="store_true",
+        default=False,
+        help=t("cli.help.restore.sftp"),
+    )
+    restore_parser.add_argument(
+        "--webdav",
+        action="store_true",
+        default=False,
+        help=t("cli.help.restore.webdav"),
+    )
+    restore_parser.add_argument(
+        "--cloud",
+        action="store_true",
+        default=False,
+        help=t("cli.help.restore.cloud"),
+    )
 
     info_parser = subparsers.add_parser("info", help=t("cli.help.info"))
     info_parser.add_argument("backup_file", help=t("cli.help.info.file"))
@@ -426,6 +444,9 @@ def get_parser() -> argparse.ArgumentParser:
     diff_parser.add_argument("source", help=t("cli.help.diff.source"))
     diff_parser.add_argument(
         "backup_file", nargs="?", default=None, help=t("cli.help.diff.file")
+    )
+    diff_parser.add_argument(
+        "backup_file2", nargs="?", default=None, help=t("cli.help.diff.file2")
     )
     diff_parser.add_argument("--password", default="", help=t("cli.help.diff.password"))
     diff_parser.add_argument(
@@ -1440,6 +1461,11 @@ def _handle_watch(args, config, manager) -> int:
 
 
 def _handle_restore(args, config, manager) -> int:
+    # 检测远端还原标志
+    is_remote = args.sftp or args.webdav or args.cloud
+    backend = "sftp" if args.sftp else ("webdav" if args.webdav else "cloud")
+    tmp_downloaded: str | None = None
+
     tag = getattr(args, "tag", "") or ""
     if tag:
         entries = manager.get_history_by_tag(tag)
@@ -1447,12 +1473,11 @@ def _handle_restore(args, config, manager) -> int:
             print(t("cmd.restore.tag_not_found", tag=tag))
             return 1
         backup_path = entries[-1].get("path", "")
-        if not backup_path or not os.path.isfile(backup_path):
+        if not backup_path or (not is_remote and not os.path.isfile(backup_path)):
             print(t("cmd.restore.tag_not_found", tag=tag))
             return 1
         target_dir = args.backup_file or ""
         if not target_dir:
-            # --list / --search / --stats 不需要 target_dir
             if not (
                 args.list
                 or getattr(args, "search", None)
@@ -1463,9 +1488,9 @@ def _handle_restore(args, config, manager) -> int:
     else:
         backup_path = args.backup_file or ""
         target_dir = args.target_dir or ""
-        # --list / --search / --stats 不需要 target_dir
         if not backup_path or (
             not target_dir
+            and not is_remote
             and not args.list
             and not getattr(args, "search", None)
             and not getattr(args, "stats", False)
@@ -1474,82 +1499,108 @@ def _handle_restore(args, config, manager) -> int:
             parser.print_help()
             return 1
 
-    # 检查备份文件是否存在
-    if not os.path.isfile(backup_path):
-        print(t("err.file.not_found", path=backup_path))
-        return 1
+    try:
+        # 远端模式：先下载到临时文件
+        if is_remote:
+            if not backup_path:
+                print(t("cli.help.restore.file"))
+                return 1
+            backend_label = {"sftp": "SFTP", "webdav": "WebDAV", "cloud": "S3"}.get(backend, backend)
+            print(t("restore.remote.downloading", backend=backend_label, filename=backup_path))
+            from sbackup.compression import download_remote_backup
 
-    if args.list:
-        from sbackup.compression import list_backup_contents
+            tmp_downloaded = download_remote_backup(backup_path, config, backend)
+            if tmp_downloaded is None:
+                print(t("restore.remote.download_failed", error="see log for details"))
+                return 1
+            backup_path = tmp_downloaded
+            # 远端模式下如果没指定 target_dir，设定默认值
+            if not target_dir and not args.list and not getattr(args, "search", None) and not getattr(args, "stats", False):
+                target_dir = "."
 
-        print(list_backup_contents(backup_path, args.password))
-        return 0
+        # 检查备份文件是否存在
+        if not os.path.isfile(backup_path):
+            print(t("err.file.not_found", path=backup_path))
+            return 1
 
-    # --search: 使用 SelectiveRestore 搜索文件
-    search_keyword = getattr(args, "search", None)
-    if search_keyword:
-        from sbackup.selective import SelectiveRestore
+        if args.list:
+            from sbackup.compression import list_backup_contents
 
-        sr = SelectiveRestore(backup_path, args.password)
-        results = sr.search(search_keyword)
-        if results:
-            print(
-                t(
-                    "cmd.restore.search.found",
-                    count=len(results),
+            print(list_backup_contents(backup_path, args.password))
+            return 0
+
+        # --search: 使用 SelectiveRestore 搜索文件
+        search_keyword = getattr(args, "search", None)
+        if search_keyword:
+            from sbackup.selective import SelectiveRestore
+
+            sr = SelectiveRestore(backup_path, args.password)
+            results = sr.search(search_keyword)
+            if results:
+                print(
+                    t(
+                        "cmd.restore.search.found",
+                        count=len(results),
+                    )
                 )
-            )
-            for f in results:
-                print(f"  {f['name']}")
-        else:
-            print(
-                t(
-                    "cmd.restore.search.no_results",
-                    keyword=search_keyword,
-                    path=backup_path,
+                for f in results:
+                    print(f"  {f['name']}")
+            else:
+                print(
+                    t(
+                        "cmd.restore.search.no_results",
+                        keyword=search_keyword,
+                        path=backup_path,
+                    )
                 )
-            )
-        return 0 if results else 1
+            return 0 if results else 1
 
-    # --stats: 使用 SelectiveRestore 显示统计信息
-    if getattr(args, "stats", False):
-        from sbackup.selective import SelectiveRestore
+        # --stats: 使用 SelectiveRestore 显示统计信息
+        if getattr(args, "stats", False):
+            from sbackup.selective import SelectiveRestore
 
-        sr = SelectiveRestore(backup_path, args.password)
-        stats = sr.get_stats()
-        print(t("cmd.restore.stats.header", path=backup_path))
-        print(t("cmd.restore.stats.files", count=stats["total_files"]))
-        print(t("cmd.restore.stats.dirs", count=stats["total_dirs"]))
-        print(t("cmd.restore.stats.size", size=stats["total_size"]))
-        if stats["formats"]:
-            print(t("cmd.restore.stats.formats"))
-            for ext, count in sorted(stats["formats"].items()):
-                print(t("cmd.restore.stats.format_item", ext=ext, count=count))
-        return 0
+            sr = SelectiveRestore(backup_path, args.password)
+            stats = sr.get_stats()
+            print(t("cmd.restore.stats.header", path=backup_path))
+            print(t("cmd.restore.stats.files", count=stats["total_files"]))
+            print(t("cmd.restore.stats.dirs", count=stats["total_dirs"]))
+            print(t("cmd.restore.stats.size", size=stats["total_size"]))
+            if stats["formats"]:
+                print(t("cmd.restore.stats.formats"))
+                for ext, count in sorted(stats["formats"].items()):
+                    print(t("cmd.restore.stats.format_item", ext=ext, count=count))
+            return 0
 
-    # --select: 选择性恢复
-    select_patterns = getattr(args, "select", None)
-    if select_patterns:
-        from sbackup.selective import SelectiveRestore
+        # --select: 选择性恢复
+        select_patterns = getattr(args, "select", None)
+        if select_patterns:
+            from sbackup.selective import SelectiveRestore
 
-        sr = SelectiveRestore(backup_path, args.password)
-        extracted_count, extracted_paths = sr.extract_files(select_patterns, target_dir)
-        patterns_str = ", ".join(select_patterns)
-        if extracted_count > 0:
-            print(
-                t(
-                    "cmd.restore.selective.success",
-                    count=extracted_count,
-                    target=target_dir,
+            sr = SelectiveRestore(backup_path, args.password)
+            extracted_count, extracted_paths = sr.extract_files(select_patterns, target_dir)
+            patterns_str = ", ".join(select_patterns)
+            if extracted_count > 0:
+                print(
+                    t(
+                        "cmd.restore.selective.success",
+                        count=extracted_count,
+                        target=target_dir,
+                    )
                 )
-            )
-        else:
-            print(t("restore.no_match", pattern=patterns_str))
-        return 0 if extracted_count > 0 else 1
+            else:
+                print(t("restore.no_match", pattern=patterns_str))
+            return 0 if extracted_count > 0 else 1
 
-    # 默认：还原全部
-    result = restore_backup(backup_path, target_dir, args.password)
-    return 0 if result["success"] else 1
+        # 默认：还原全部
+        result = restore_backup(backup_path, target_dir, args.password)
+        return 0 if result["success"] else 1
+    finally:
+        # 清理临时下载文件
+        if tmp_downloaded and os.path.exists(tmp_downloaded):
+            try:
+                os.remove(tmp_downloaded)
+            except OSError:
+                pass
 
 
 def _handle_info(args, config, manager) -> int:
@@ -1563,7 +1614,8 @@ def _handle_info(args, config, manager) -> int:
 def _handle_diff(args, config, manager) -> int:
     source = parse_path(args.source)
     diff_result = manager.diff_backup(
-        source, args.backup_file, args.password, detail=args.detail
+        source, args.backup_file, args.password,
+        detail=args.detail, backup_file2=args.backup_file2,
     )
     if not diff_result.get("success"):
         return 1
