@@ -37,25 +37,52 @@ jobs:
           python-version: '3.12'
 
       - name: Install dependencies
-        run: pip install nuitka py7zr tqdm zstandard
+        run: pip install nuitka py7zr tqdm zstandard paramiko minio reedsolo watchdog
+
+      - name: Extract version from tag
+        id: version
+        shell: bash
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
+
+      - name: Read release notes
+        id: notes
+        shell: bash
+        run: |
+          NOTES_FILE="releases/v${{ steps.version.outputs.VERSION }}.md"
+          if [ -f "$NOTES_FILE" ]; then
+            echo "HAS_NOTES=true" >> $GITHUB_OUTPUT
+            # 使用 EOF 分隔符避免特殊字符问题
+            echo "NOTES<<EOF" >> $GITHUB_OUTPUT
+            cat "$NOTES_FILE" >> $GITHUB_OUTPUT
+            echo "" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+          else
+            echo "HAS_NOTES=false" >> $GITHUB_OUTPUT
+            echo "NOTES=Release v${{ steps.version.outputs.VERSION }}" >> $GITHUB_OUTPUT
+          fi
 
       - name: Build executable
         run: |
           python -m nuitka `
             --onefile `
             --assume-yes-for-downloads `
-            --output-filename=sbackup.exe `
+            --output-filename=sbackup-${{ steps.version.outputs.VERSION }}-windows-x64.exe `
             --include-package=sbackup `
             --include-data-dir=sbackup/locales=sbackup/locales `
             --include-package=py7zr `
             --include-package=tqdm `
             --include-package=zstandard `
+            --include-package=paramiko `
+            --include-package=minio `
+            --include-package=reedsolo `
+            --include-package=watchdog `
             main.py
 
       - name: Upload to Release
         uses: softprops/action-gh-release@v1
         with:
-          files: sbackup.exe
+          body: ${{ steps.notes.outputs.NOTES }}
+          files: sbackup-${{ steps.version.outputs.VERSION }}-windows-x64.exe
 
   # 构建 macOS 可执行文件
   build-macos:
@@ -68,25 +95,53 @@ jobs:
           python-version: '3.12'
 
       - name: Install dependencies
-        run: pip install nuitka py7zr tqdm zstandard
+        run: pip install nuitka py7zr tqdm zstandard paramiko minio reedsolo watchdog
+
+      - name: Extract version from tag
+        id: version
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
+
+      - name: Detect architecture
+        id: arch
+        run: echo "ARCH=$(uname -m)" >> $GITHUB_OUTPUT
+
+      - name: Read release notes
+        id: notes
+        run: |
+          NOTES_FILE="releases/v${{ steps.version.outputs.VERSION }}.md"
+          if [ -f "$NOTES_FILE" ]; then
+            echo "HAS_NOTES=true" >> $GITHUB_OUTPUT
+            echo "NOTES<<EOF" >> $GITHUB_OUTPUT
+            cat "$NOTES_FILE" >> $GITHUB_OUTPUT
+            echo "" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+          else
+            echo "HAS_NOTES=false" >> $GITHUB_OUTPUT
+            echo "NOTES=Release v${{ steps.version.outputs.VERSION }}" >> $GITHUB_OUTPUT
+          fi
 
       - name: Build executable
         run: |
           python -m nuitka \
             --onefile \
             --assume-yes-for-downloads \
-            --output-filename=sbackup-macos \
+            --output-filename=sbackup-${{ steps.version.outputs.VERSION }}-macos-${{ steps.arch.outputs.ARCH }} \
             --include-package=sbackup \
             --include-data-dir=sbackup/locales=sbackup/locales \
             --include-package=py7zr \
             --include-package=tqdm \
             --include-package=zstandard \
+            --include-package=paramiko \
+            --include-package=minio \
+            --include-package=reedsolo \
+            --include-package=watchdog \
             main.py
 
       - name: Upload to Release
         uses: softprops/action-gh-release@v1
         with:
-          files: sbackup-macos
+          body: ${{ steps.notes.outputs.NOTES }}
+          files: sbackup-${{ steps.version.outputs.VERSION }}-macos-${{ steps.arch.outputs.ARCH }}
 
   # 构建 Linux 可执行文件
   build-linux:
@@ -99,22 +154,50 @@ jobs:
           python-version: '3.12'
 
       - name: Install dependencies
-        run: pip install nuitka py7zr tqdm zstandard
+        run: pip install nuitka py7zr tqdm zstandard paramiko minio reedsolo watchdog
+
+      - name: Extract version from tag
+        id: version
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
+
+      - name: Detect architecture
+        id: arch
+        run: echo "ARCH=$(uname -m)" >> $GITHUB_OUTPUT
+
+      - name: Read release notes
+        id: notes
+        run: |
+          NOTES_FILE="releases/v${{ steps.version.outputs.VERSION }}.md"
+          if [ -f "$NOTES_FILE" ]; then
+            echo "HAS_NOTES=true" >> $GITHUB_OUTPUT
+            echo "NOTES<<EOF" >> $GITHUB_OUTPUT
+            cat "$NOTES_FILE" >> $GITHUB_OUTPUT
+            echo "" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+          else
+            echo "HAS_NOTES=false" >> $GITHUB_OUTPUT
+            echo "NOTES=Release v${{ steps.version.outputs.VERSION }}" >> $GITHUB_OUTPUT
+          fi
 
       - name: Build executable
         run: |
           python -m nuitka \
             --onefile \
             --assume-yes-for-downloads \
-            --output-filename=sbackup-linux \
+            --output-filename=sbackup-${{ steps.version.outputs.VERSION }}-linux-${{ steps.arch.outputs.ARCH }} \
             --include-package=sbackup \
             --include-data-dir=sbackup/locales=sbackup/locales \
             --include-package=py7zr \
             --include-package=tqdm \
             --include-package=zstandard \
+            --include-package=paramiko \
+            --include-package=minio \
+            --include-package=reedsolo \
+            --include-package=watchdog \
             main.py
 
       - name: Upload to Release
         uses: softprops/action-gh-release@v1
         with:
-          files: sbackup-linux
+          body: ${{ steps.notes.outputs.NOTES }}
+          files: sbackup-${{ steps.version.outputs.VERSION }}-linux-${{ steps.arch.outputs.ARCH }}

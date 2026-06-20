@@ -1,6 +1,6 @@
 [project]
 name = "sbackup-cli"
-version = "1.0.1"
+version = "2.0.0"
 description = "智能文件夹备份工具，支持增量备份和自定义配置"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -18,8 +18,12 @@ classifiers = [
     "Topic :: System :: Archiving :: Backup",
 ]
 dependencies = [
+    "minio>=7.2.20",
+    "paramiko>=4.0.0",
     "py7zr>=1.1.0",
+    "reedsolo>=1.7.0",
     "tqdm>=4.67.3",
+    "watchdog>=6.0.0",
     "zstandard>=0.25.0",
 ]
 
@@ -27,12 +31,13 @@ dependencies = [
 sbackup = "sbackup:run"
 
 [project.urls]
-Homepage = "https://gitee.com/xiatianxuan"
-Repository = "https://gitee.com/xiatianxuan/sbackup"
+Homepage = "https://github.com/xiatianxuan/sbackup"
+Repository = "https://github.com/xiatianxuan/sbackup"
 
 [dependency-groups]
 dev = [
     "coverage>=7.13.5",
+    "pytest>=9.0.3",
 ]
 
 [tool.setuptools.packages.find]

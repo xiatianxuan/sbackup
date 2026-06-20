@@ -1,0 +1,320 @@
+"""
+WebDAV 远程备份模块：基于 HTTP 的文件上传（支持坚果云、NextCloud、群晖等）
+使用 Python 标准库 urllib，零额外依赖。
+"""
+
+import os
+import sys
+import socket
+import ipaddress
+import logging
+import urllib.request
+import urllib.error
+import urllib.parse
+from base64 import b64encode
+from io import BytesIO
+
+from sbackup.i18n import t
+from sbackup.ratelimiter import RateLimiter
+
+logger = logging.getLogger(__name__)
+
+
+class WebDAVError(Exception):
+    """WebDAV 操作异常"""
+
+    pass
+
+
+class WebDAVClient:
+    """WebDAV 客户端，基于 urllib 实现，零额外依赖"""
+
+    def __init__(self, url: str, user: str, password: str):
+        # SSRF 防护：验证 URL scheme 和内部 IP
+        parsed = urllib.parse.urlparse(url)
+        if parsed.scheme not in ("http", "https"):
+            raise WebDAVError(
+                t("err.webdav.invalid_scheme", scheme=parsed.scheme or "missing")
+            )
+
+        # HTTP 明文警告
+        if parsed.scheme == "http":
+            print(
+                t("warn.webdav.http_plaintext", url=url),
+                file=sys.stderr,
+            )
+
+        # 阻止内网地址
+        if parsed.hostname:
+            try:
+                host_ip = socket.getaddrinfo(
+                    parsed.hostname, None, type=socket.SOCK_STREAM
+                )[0][4][0]
+                ip = ipaddress.ip_address(host_ip)
+                if (
+                    ip.is_private
+                    or ip.is_loopback
+                    or ip.is_link_local
+                    or ip.is_multicast
+                ):
+                    raise WebDAVError(t("err.webdav.private_ip", host=parsed.hostname))
+            except WebDAVError:
+                raise
+            except (OSError, ValueError):
+                pass
+
+        self.url = url.rstrip("/")
+        # 保留原始 URL 的尾部斜杠（某些服务器要求）
+        if url.endswith("/") and not self.url.endswith("/"):
+            self.url += "/"
+        self.user = user
+        self.password = password
+        self._auth_header = self._make_auth()
+        # 支持 PROPFIND 等非标准方法的重定向
+        redirect_handler = urllib.request.HTTPRedirectHandler()
+        redirect_handler.redirect_request = self._redirect_request
+        self._opener = urllib.request.build_opener(redirect_handler)
+
+    def _make_auth(self) -> str:
+        """生成 Basic Auth 头"""
+        credentials = f"{self.user}:{self.password}"
+        encoded = b64encode(credentials.encode("utf-8")).decode("utf-8")
+        return f"Basic {encoded}"
+
+    def _redirect_request(self, req, fp, code, msg, headers, newurl):
+        """处理重定向，保留原始请求方法和认证头"""
+        new_req = urllib.request.Request(
+            newurl,
+            method=req.get_method(),
+            data=req.data,
+            headers={
+                k: v for k, v in req.header_items()
+                if k.lower() not in ("host", "content-length")
+            },
+        )
+        return new_req
+
+    def _build_url(self, path: str = "") -> str:
+        """构建完整 URL"""
+        path = path.strip("/")
+        if path:
+            return f"{self.url.rstrip('/')}/{path}"
+        return self.url
+
+    def _build_request(
+        self,
+        method: str,
+        path: str = "",
+        data: bytes | None = None,
+        content_type: str = "application/octet-stream",
+    ) -> urllib.request.Request:
+        """构建 HTTP 请求对象"""
+        url = self._build_url(path)
+        req = urllib.request.Request(url, data=data, method=method)
+        req.add_header("Authorization", self._auth_header)
+        req.add_header("User-Agent", "sbackup/1.0")
+        if data is not None:
+            req.add_header("Content-Length", str(len(data)))
+        if content_type:
+            req.add_header("Content-Type", content_type)
+        return req
+
+    def _ensure_remote_dir(self, path: str) -> None:
+        """递归创建远程目录（MKCOL）"""
+        if not path:
+            return
+        parts = [p for p in path.strip("/").split("/") if p]
+        current = ""
+        for part in parts:
+            current = f"{current}/{part}" if current else part
+            try:
+                req = self._build_request("MKCOL", current)
+                self._opener.open(req, timeout=30)
+                logger.debug("创建远程目录: %s", current)
+            except urllib.error.HTTPError as e:
+                if e.code == 405:
+                    # 405 Method Not Allowed = 目录已存在
+                    pass
+                elif e.code == 401:
+                    raise WebDAVError(t("err.webdav.auth", host=self.url))
+                else:
+                    raise WebDAVError(t("err.webdav.mkdir", path=current, error=str(e)))
+            except OSError as e:
+                raise WebDAVError(t("err.webdav.connect", url=self.url, error=str(e)))
+
+    def connect(self) -> None:
+        """测试 WebDAV 连接（PROPFIND）"""
+        try:
+            req = self._build_request(
+                "PROPFIND",
+                data=b'<?xml version="1.0"?>'
+                b'<D:propfind xmlns:D="DAV:"><D:allprop/></D:propfind>',
+                content_type="application/xml",
+            )
+            req.add_header("Depth", "0")
+            resp = self._opener.open(req, timeout=15)
+
+            # XML 炸弹防护：限制响应大小
+            MAX_CONNECT_XML_SIZE = 1 * 1024 * 1024  # 1MB
+            xml_data = resp.read(MAX_CONNECT_XML_SIZE + 1)
+            if len(xml_data) > MAX_CONNECT_XML_SIZE:
+                raise WebDAVError(t("err.webdav.xml_too_large", size=len(xml_data)))
+
+            logger.debug("WebDAV 连接成功: %s", self.url)
+        except urllib.error.HTTPError as e:
+            if e.code == 401:
+                raise WebDAVError(t("err.webdav.auth", host=self.url))
+            raise WebDAVError(t("err.webdav.connect", url=self.url, error=str(e)))
+        except OSError as e:
+            raise WebDAVError(t("err.webdav.connect", url=self.url, error=str(e)))
+
+    def upload_file(
+        self, local_path: str, remote_path: str, rate_limiter: RateLimiter | None = None
+    ) -> int:
+        """
+        上传文件到 WebDAV 服务器
+        :param local_path: 本地文件路径
+        :param remote_path: 远程文件路径
+        :param rate_limiter: 带宽限速器，None 表示不限速
+        :return: 上传的字节数
+        """
+        if not os.path.isfile(local_path):
+            raise WebDAVError(t("err.webdav.local_not_found", path=local_path))
+
+        # 确保远程目录存在
+        remote_dir = os.path.dirname(remote_path).replace("\\", "/")
+        self._ensure_remote_dir(remote_dir)
+
+        file_size = os.path.getsize(local_path)
+        logger.debug(
+            "开始上传: %s -> %s (%d bytes)", local_path, remote_path, file_size
+        )
+
+        try:
+            url = self._build_url(remote_path)
+            if rate_limiter is not None:
+                # 有限速时：分块读入 BytesIO，每块限速
+                buf = BytesIO()
+                with open(local_path, "rb") as f:
+                    while True:
+                        chunk = f.read(65536)  # 64KB
+                        if not chunk:
+                            break
+                        rate_limiter.wait(len(chunk))
+                        buf.write(chunk)
+                data = buf.getvalue()
+                req = urllib.request.Request(url, data=data, method="PUT")
+                req.add_header("Authorization", self._auth_header)
+                req.add_header("Content-Length", str(len(data)))
+                self._opener.open(req, timeout=300)
+            else:
+                # 不限速时保持流式上传（不读入内存）
+                with open(local_path, "rb") as f:
+                    req = urllib.request.Request(url, data=f, method="PUT")
+                    req.add_header("Authorization", self._auth_header)
+                    req.add_header("Content-Length", str(file_size))
+                    self._opener.open(req, timeout=300)
+            logger.debug("上传成功: %s", remote_path)
+            return file_size
+        except urllib.error.HTTPError as e:
+            if e.code == 401:
+                raise WebDAVError(t("err.webdav.auth", host=self.url))
+            raise WebDAVError(t("err.webdav.upload", path=remote_path, error=str(e)))
+        except OSError as e:
+            raise WebDAVError(t("err.webdav.upload", path=remote_path, error=str(e)))
+
+    def list_remote_files(self, remote_path: str = "") -> list[dict]:
+        """
+        列出远程目录下的文件（PROPFIND）
+        :return: 包含 name, size, mtime 的字典列表
+        """
+        import xml.etree.ElementTree as ET
+
+        try:
+            body = (
+                '<?xml version="1.0"?>'
+                '<D:propfind xmlns:D="DAV:">'
+                "<D:allprop/>"
+                "</D:propfind>"
+            )
+            req = self._build_request(
+                "PROPFIND",
+                remote_path,
+                data=body.encode("utf-8"),
+                content_type="application/xml",
+            )
+            req.add_header("Depth", "1")
+            resp = self._opener.open(req, timeout=30)
+            xml_data = resp.read()
+        except urllib.error.HTTPError as e:
+            if e.code == 401:
+                raise WebDAVError(t("err.webdav.auth", host=self.url))
+            raise WebDAVError(t("err.webdav.list", path=remote_path, error=str(e)))
+        except OSError as e:
+            raise WebDAVError(t("err.webdav.list", path=remote_path, error=str(e)))
+
+        # XML 炸弹防护：限制响应大小
+        MAX_XML_SIZE = 10 * 1024 * 1024  # 10MB
+        if len(xml_data) > MAX_XML_SIZE:
+            raise WebDAVError(t("err.webdav.xml_too_large", size=len(xml_data)))
+
+        files = []
+        try:
+            root = ET.fromstring(xml_data)
+            ns = {"D": "DAV:"}
+            for resp_elem in root.findall(".//D:response", ns):
+                href = resp_elem.findtext("D:href", "", ns)
+                if not href:
+                    continue
+                # 跳过目录（有 resourcetype collection）
+                rt = resp_elem.find(".//D:resourcetype/D:collection", ns)
+                if rt is not None:
+                    continue
+                name = href.rstrip("/").split("/")[-1]
+                if not name:
+                    continue
+                size_text = resp_elem.findtext(".//D:getcontentlength", "0", ns)
+                mtime_text = resp_elem.findtext(".//D:getlastmodified", "", ns)
+                size = int(size_text) if size_text else 0
+                # 解析 HTTP 日期格式
+                mtime = 0.0
+                if mtime_text:
+                    try:
+                        from email.utils import parsedate_to_datetime
+
+                        mtime = parsedate_to_datetime(mtime_text).timestamp()
+                    except (ValueError, TypeError):
+                        mtime = 0.0
+                files.append({"name": name, "size": size, "mtime": mtime})
+        except ET.ParseError:
+            pass
+        return files
+
+    def delete_remote_file(self, remote_path: str) -> None:
+        """删除远程文件（DELETE）"""
+        try:
+            req = self._build_request("DELETE", remote_path)
+            self._opener.open(req, timeout=30)
+            logger.debug("WebDAV 删除文件: %s", remote_path)
+        except urllib.error.HTTPError as e:
+            if e.code == 401:
+                raise WebDAVError(t("err.webdav.auth", host=self.url))
+            if e.code == 404:
+                raise WebDAVError(t("err.webdav.not_found", path=remote_path))
+            raise WebDAVError(t("err.webdav.delete", path=remote_path, error=str(e)))
+        except OSError as e:
+            raise WebDAVError(t("err.webdav.delete", path=remote_path, error=str(e)))
+
+    def test_connection(self) -> bool:
+        """测试连接是否可用"""
+        try:
+            self.connect()
+            return True
+        except WebDAVError:
+            return False
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        return False

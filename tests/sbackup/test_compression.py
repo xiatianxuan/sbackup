@@ -6,9 +6,10 @@ import unittest
 import os
 import shutil
 import tarfile
+import tempfile
 import zipfile
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 from sbackup.config import Config
 from sbackup.compression import (
     ZipfileCompression,
@@ -17,6 +18,8 @@ from sbackup.compression import (
     SevenZipCompression,
     create_compressor,
     restore_backup,
+    list_backup_contents,
+    verify_backup,
 )
 from sbackup.i18n import t
 
@@ -465,6 +468,48 @@ class TestRestore(unittest.TestCase):
         )
         os.remove("test.tar.zst")
 
+    @patch("builtins.print")
+    def test_restore_permission_error(self, mock_print):
+        """测试还原时权限不足"""
+        config = Config(folder_path=self.test_dir, zipfile_path="test.zip")
+        ZipfileCompression(config).compress()
+        with patch("zipfile.ZipFile") as mock_zf:
+            mock_zf.return_value.__enter__ = MagicMock(
+                side_effect=PermissionError("denied")
+            )
+            mock_zf.return_value.__exit__ = MagicMock(return_value=False)
+            result = restore_backup("test.zip", self.restore_dir)
+        self.assertFalse(result["success"])
+
+    @patch("builtins.print")
+    def test_restore_os_error(self, mock_print):
+        """测试还原时 OS 错误"""
+        config = Config(folder_path=self.test_dir, zipfile_path="test.zip")
+        ZipfileCompression(config).compress()
+        with patch("zipfile.ZipFile") as mock_zf:
+            mock_zf.return_value.__enter__ = MagicMock(
+                side_effect=OSError("disk error")
+            )
+            mock_zf.return_value.__exit__ = MagicMock(return_value=False)
+            result = restore_backup("test.zip", self.restore_dir)
+        self.assertFalse(result["success"])
+
+    @patch("builtins.print")
+    def test_restore_7z_permission_error(self, mock_print):
+        """测试 7z 还原时权限不足"""
+        config = Config(
+            folder_path=self.test_dir, zipfile_path="test.7z", compression_format="7Z"
+        )
+        SevenZipCompression(config).compress()
+        with patch("py7zr.SevenZipFile") as mock_7z:
+            mock_7z.return_value.__enter__ = MagicMock(
+                side_effect=PermissionError("denied")
+            )
+            mock_7z.return_value.__exit__ = MagicMock(return_value=False)
+            result = restore_backup("test.7z", self.restore_dir)
+        self.assertFalse(result["success"])
+        os.remove("test.7z")
+
 
 class TestPathMatching(unittest.TestCase):
     def setUp(self):
@@ -533,6 +578,44 @@ class TestTarNoCompression(unittest.TestCase):
         result = compressor.compress()
         self.assertTrue(result["success"])
         self.assertTrue(os.path.exists("test.tar"))
+
+    @patch("builtins.print")
+    def test_tar_permission_error(self, mock_print):
+        """测试 tar 压缩时权限不足"""
+        config = Config(
+            folder_path=self.test_dir,
+            zipfile_path="/root/test.tar",
+            compression_format="TAR",
+        )
+        compressor = TarfileCompression(config)
+        result = compressor.compress()
+        self.assertFalse(result["success"])
+
+    @patch("builtins.print")
+    def test_tar_os_error(self, mock_print):
+        """测试 tar 压缩时系统错误"""
+        config = Config(
+            folder_path=self.test_dir,
+            zipfile_path="test.tar",
+            compression_format="TAR",
+        )
+        compressor = TarfileCompression(config)
+        with patch("tarfile.open", side_effect=OSError("disk error")):
+            result = compressor.compress()
+        self.assertFalse(result["success"])
+
+    @patch("builtins.print")
+    def test_tar_unknown_exception(self, mock_print):
+        """测试 tar 压缩时未知异常"""
+        config = Config(
+            folder_path=self.test_dir,
+            zipfile_path="test.tar",
+            compression_format="TAR",
+        )
+        compressor = TarfileCompression(config)
+        with patch("tarfile.open", side_effect=RuntimeError("unexpected")):
+            result = compressor.compress()
+        self.assertFalse(result["success"])
 
 
 class TestZstdCompression(unittest.TestCase):
@@ -610,6 +693,19 @@ class TestZstdCompression(unittest.TestCase):
         )
         compressor = ZstdCompression(config)
         with patch("zstandard.ZstdCompressor", side_effect=OSError("error")):
+            result = compressor.compress()
+        self.assertFalse(result["success"])
+
+    @patch("builtins.print")
+    def test_zstd_unknown_exception(self, mock_print):
+        """测试 zstd 压缩未知异常"""
+        config = Config(
+            folder_path=self.test_dir,
+            zipfile_path="test.tar.zst",
+            compression_format="TAR_ZST",
+        )
+        compressor = ZstdCompression(config)
+        with patch("zstandard.ZstdCompressor", side_effect=RuntimeError("unexpected")):
             result = compressor.compress()
         self.assertFalse(result["success"])
 
@@ -703,6 +799,527 @@ class TestSevenZipCompression(unittest.TestCase):
         with py7zr.SevenZipFile("test.7z", "r", password="secret123") as szf:
             names = szf.getnames()
             self.assertGreater(len(names), 0)
+
+    @patch("builtins.print")
+    def test_7z_unknown_exception(self, mock_print):
+        """测试 7z 压缩未知异常"""
+        config = Config(
+            folder_path=self.test_dir, zipfile_path="test.7z", compression_format="7Z"
+        )
+        compressor = SevenZipCompression(config)
+        with patch("py7zr.SevenZipFile", side_effect=RuntimeError("unexpected")):
+            result = compressor.compress()
+        self.assertFalse(result["success"])
+
+
+class TestCreateCompressor(unittest.TestCase):
+    """测试工厂函数 create_compressor 的各种格式"""
+
+    def test_create_compressor_tar(self):
+        """测试工厂函数创建 TAR 压缩器"""
+        config = Config(folder_path=".", compression_format="TAR")
+        compressor = create_compressor(config)
+        self.assertIsInstance(compressor, TarfileCompression)
+
+    def test_create_compressor_tar_gz_with_dot(self):
+        """测试 tar.gz（带点号）格式正确匹配 TarfileCompression"""
+        config = Config(folder_path=".", compression_format="tar.gz")
+        compressor = create_compressor(config)
+        self.assertIsInstance(compressor, TarfileCompression)
+
+    def test_create_compressor_tar_bz2_with_dot(self):
+        """测试 tar.bz2（带点号）格式正确匹配"""
+        config = Config(folder_path=".", compression_format="tar.bz2")
+        compressor = create_compressor(config)
+        self.assertIsInstance(compressor, TarfileCompression)
+
+    def test_create_compressor_tar_xz_with_dot(self):
+        """测试 tar.xz（带点号）格式正确匹配"""
+        config = Config(folder_path=".", compression_format="tar.xz")
+        compressor = create_compressor(config)
+        self.assertIsInstance(compressor, TarfileCompression)
+
+    def test_create_compressor_tar_zst_with_dot(self):
+        """测试 tar.zst（带点号）格式正确匹配"""
+        config = Config(folder_path=".", compression_format="tar.zst")
+        compressor = create_compressor(config)
+        self.assertIsInstance(compressor, ZstdCompression)
+
+
+class TestShouldIgnore(unittest.TestCase):
+    """测试 _should_ignore 模式匹配"""
+
+    def setUp(self):
+        self.test_dir = tempfile.mkdtemp()
+        os.makedirs(os.path.join(self.test_dir, "sub"), exist_ok=True)
+
+    def tearDown(self):
+        shutil.rmtree(self.test_dir, ignore_errors=True)
+
+    def test_should_ignore_directory_pattern(self):
+        """测试忽略目录模式"""
+        config = Config(folder_path=self.test_dir, skip_patterns=["sub"])
+        compressor = ZipfileCompression(config)
+        self.assertTrue(compressor._should_ignore("sub"))
+
+    def test_should_ignore_no_match(self):
+        """测试不匹配时不忽略"""
+        config = Config(folder_path=self.test_dir, skip_patterns=["*.log"])
+        compressor = ZipfileCompression(config)
+        self.assertFalse(compressor._should_ignore("readme.txt"))
+
+    def test_should_ignore_basename_match(self):
+        """测试 basename 匹配"""
+        config = Config(folder_path=self.test_dir, skip_patterns=["*.log"])
+        compressor = ZipfileCompression(config)
+        self.assertTrue(compressor._should_ignore("subdir/error.log"))
+
+
+class TestListBackupContents(unittest.TestCase):
+    """测试 list_backup_contents 函数"""
+
+    def setUp(self):
+        self.test_dir = tempfile.mkdtemp()
+        (Path(self.test_dir) / "file1.txt").write_text("content1")
+        (Path(self.test_dir) / "sub").mkdir()
+        (Path(self.test_dir) / "sub" / "file2.txt").write_text("content2")
+        self.zip_path = os.path.join(self.test_dir, "test.zip")
+        config = Config(folder_path=self.test_dir, zipfile_path=self.zip_path)
+        ZipfileCompression(config).compress()
+
+    def tearDown(self):
+        shutil.rmtree(self.test_dir, ignore_errors=True)
+
+    def test_list_zip_contents(self):
+        """测试列出 ZIP 文件内容"""
+        result = list_backup_contents(self.zip_path)
+        self.assertIn("file1.txt", result)
+        self.assertIn("file2.txt", result)
+        self.assertIn("2 files", result)
+
+    def test_list_nonexistent_file(self):
+        """测试列出不存在的文件"""
+        result = list_backup_contents("/nonexistent/file.zip")
+        self.assertIn("/nonexistent/file.zip", result)
+
+    def test_list_unknown_format(self):
+        """测试列出未知格式文件（返回空列表提示）"""
+        unknown = os.path.join(self.test_dir, "test.xyz")
+        Path(unknown).write_text("data")
+        result = list_backup_contents(unknown)
+        self.assertIn("test.xyz", result)
+
+
+class TestVerifyBackup(unittest.TestCase):
+    """测试 verify_backup 函数"""
+
+    def setUp(self):
+        self.test_dir = tempfile.mkdtemp()
+        (Path(self.test_dir) / "file1.txt").write_text("content1")
+        (Path(self.test_dir) / "sub").mkdir()
+        (Path(self.test_dir) / "sub" / "file2.txt").write_text("content2")
+        self.zip_path = os.path.join(self.test_dir, "test.zip")
+        config = Config(folder_path=self.test_dir, zipfile_path=self.zip_path)
+        ZipfileCompression(config).compress()
+
+    def tearDown(self):
+        shutil.rmtree(self.test_dir, ignore_errors=True)
+
+    def test_verify_valid_zip(self):
+        """测试校验有效 ZIP 文件"""
+        result = verify_backup(self.zip_path)
+        self.assertTrue(result["success"])
+        self.assertEqual(result["files_count"], 2)
+
+    def test_verify_nonexistent(self):
+        """测试校验不存在的文件"""
+        result = verify_backup("/nonexistent/file.zip")
+        self.assertFalse(result["success"])
+
+
+class TestSbackupIgnore(unittest.TestCase):
+    """测试 .sbackupignore 文件支持"""
+
+    def setUp(self):
+        self.test_dir = tempfile.mkdtemp()
+        (Path(self.test_dir) / "keep.txt").write_text("keep")
+        (Path(self.test_dir) / "skip.log").write_text("skip")
+        (Path(self.test_dir) / "sub").mkdir()
+        (Path(self.test_dir) / "sub" / "data.txt").write_text("data")
+        self.zip_path = os.path.join(self.test_dir, "test.zip")
+
+    def tearDown(self):
+        shutil.rmtree(self.test_dir, ignore_errors=True)
+
+    def test_ignore_file_loaded(self):
+        """测试 .sbackupignore 文件中的规则生效"""
+        (Path(self.test_dir) / ".sbackupignore").write_text("*.log\n# comment\n")
+        config = Config(
+            folder_path=self.test_dir,
+            zipfile_path=self.zip_path,
+            skip_patterns=[],
+        )
+        compressor = ZipfileCompression(config)
+        result = compressor.compress()
+        self.assertTrue(result["success"])
+        with zipfile.ZipFile(self.zip_path, "r") as zf:
+            names = zf.namelist()
+            self.assertTrue(any(n.endswith("keep.txt") for n in names))
+            self.assertFalse(any(n.endswith("skip.log") for n in names))
+
+    def test_ignore_file_not_present(self):
+        """测试没有 .sbackupignore 时不影响正常压缩"""
+        config = Config(
+            folder_path=self.test_dir,
+            zipfile_path=self.zip_path,
+            skip_patterns=[],
+        )
+        compressor = ZipfileCompression(config)
+        result = compressor.compress()
+        self.assertTrue(result["success"])
+        with zipfile.ZipFile(self.zip_path, "r") as zf:
+            names = zf.namelist()
+            self.assertTrue(any(n.endswith("keep.txt") for n in names))
+            self.assertTrue(any(n.endswith("skip.log") for n in names))
+
+
+class TestPatternNegation(unittest.TestCase):
+    """测试 ! 取反模式"""
+
+    def setUp(self):
+        self.test_dir = tempfile.mkdtemp()
+        (Path(self.test_dir) / "a.log").write_text("log")
+        (Path(self.test_dir) / "b.log").write_text("log")
+        (Path(self.test_dir) / "important.log").write_text("important")
+        self.zip_path = os.path.join(self.test_dir, "test.zip")
+
+    def tearDown(self):
+        shutil.rmtree(self.test_dir, ignore_errors=True)
+
+    def test_negation_restores_file(self):
+        """测试 ! 模式恢复被忽略的文件"""
+        config = Config(
+            folder_path=self.test_dir,
+            zipfile_path=self.zip_path,
+            skip_patterns=["*.log", "!important.log"],
+        )
+        compressor = ZipfileCompression(config)
+        result = compressor.compress()
+        self.assertTrue(result["success"])
+        with zipfile.ZipFile(self.zip_path, "r") as zf:
+            names = zf.namelist()
+            self.assertFalse(any(n.endswith("a.log") for n in names))
+            self.assertFalse(any(n.endswith("b.log") for n in names))
+            self.assertTrue(any(n.endswith("important.log") for n in names))
+
+
+class TestBackupInfo(unittest.TestCase):
+    """测试 get_backup_info 和 format_backup_info"""
+
+    def setUp(self):
+        self.test_dir = tempfile.mkdtemp()
+        self.source_dir = os.path.join(self.test_dir, "data")
+        os.makedirs(self.source_dir)
+        (Path(self.source_dir) / "file1.txt").write_text("hello")
+        (Path(self.source_dir) / "file2.txt").write_text("world")
+
+    def tearDown(self):
+        shutil.rmtree(self.test_dir, ignore_errors=True)
+
+    def _make_backup(self, fmt: str, ext: str) -> str:
+        """创建测试备份文件"""
+        config = Config(
+            folder_path=self.source_dir,
+            zipfile_path=os.path.join(self.test_dir, f"test{ext}"),
+            compression_format=fmt,
+        )
+        result = create_compressor(config).compress()
+        self.assertTrue(result["success"])
+        return result["path"]
+
+    def test_info_zip(self):
+        """测试 ZIP 备份信息"""
+        from sbackup.compression import get_backup_info
+
+        path = self._make_backup("ZIP", ".zip")
+        info = get_backup_info(path)
+        self.assertTrue(info["success"])
+        self.assertEqual(info["format"], "ZIP")
+        self.assertGreater(info["files_count"], 0)
+        self.assertGreater(info["size_bytes"], 0)
+        self.assertIn("sha256", info)
+        self.assertEqual(len(info["sha256"]), 64)  # SHA256 hex length
+
+    def test_info_tar_gz(self):
+        """测试 tar.gz 备份信息"""
+        from sbackup.compression import get_backup_info
+
+        path = self._make_backup("TAR_GZ", ".tar.gz")
+        info = get_backup_info(path)
+        self.assertTrue(info["success"])
+        self.assertEqual(info["format"], "TAR_GZ")
+
+    def test_info_nonexistent(self):
+        """测试不存在的文件"""
+        from sbackup.compression import get_backup_info
+
+        info = get_backup_info("/nonexistent/file.zip")
+        self.assertFalse(info["success"])
+
+    def test_format_info(self):
+        """测试格式化输出"""
+        from sbackup.compression import get_backup_info, format_backup_info
+
+        path = self._make_backup("ZIP", ".zip")
+        info = get_backup_info(path)
+        text = format_backup_info(info)
+        self.assertIn("ZIP", text)
+        self.assertIn("SHA256", text)
+
+    def test_format_info_failure(self):
+        """测试失败时的格式化输出"""
+        from sbackup.compression import format_backup_info
+
+        text = format_backup_info({"success": False, "error": "test error"})
+        self.assertIn("test error", text)
+
+    def test_info_7z(self):
+        """测试 7z 备份信息"""
+        from sbackup.compression import get_backup_info
+
+        path = self._make_backup("7Z", ".7z")
+        info = get_backup_info(path)
+        self.assertTrue(info["success"])
+        self.assertEqual(info["format"], "7Z")
+
+    def test_info_tar_bz2(self):
+        """测试 tar.bz2 备份信息"""
+        from sbackup.compression import get_backup_info
+
+        path = self._make_backup("TAR_BZ2", ".tar.bz2")
+        info = get_backup_info(path)
+        self.assertTrue(info["success"])
+        self.assertEqual(info["format"], "TAR_BZ2")
+
+    def test_info_tar_xz(self):
+        """测试 tar.xz 备份信息"""
+        from sbackup.compression import get_backup_info
+
+        path = self._make_backup("TAR_XZ", ".tar.xz")
+        info = get_backup_info(path)
+        self.assertTrue(info["success"])
+        self.assertEqual(info["format"], "TAR_XZ")
+
+    def test_info_tar_zst(self):
+        """测试 tar.zst 备份信息"""
+        from sbackup.compression import get_backup_info
+
+        path = self._make_backup("TAR_ZST", ".tar.zst")
+        info = get_backup_info(path)
+        self.assertTrue(info["success"])
+        self.assertEqual(info["format"], "TAR_ZST")
+
+    def test_info_tar(self):
+        """测试 tar 备份信息"""
+        from sbackup.compression import get_backup_info
+
+        path = self._make_backup("TAR", ".tar")
+        info = get_backup_info(path)
+        self.assertTrue(info["success"])
+        self.assertEqual(info["format"], "TAR")
+
+    def test_info_unknown_format(self):
+        """测试未知格式"""
+        from sbackup.compression import get_backup_info
+
+        path = os.path.join(self.test_dir, "test.xyz")
+        Path(path).write_bytes(b"unknown")
+        info = get_backup_info(path)
+        self.assertTrue(info["success"])
+        self.assertEqual(info["format"], "UNKNOWN")
+
+    def test_info_encrypted_format(self):
+        """测试 .enc 加密格式"""
+        from sbackup.compression import get_backup_info
+
+        path = os.path.join(self.test_dir, "test.enc")
+        Path(path).write_bytes(b"encrypted")
+        info = get_backup_info(path)
+        self.assertTrue(info["success"])
+        self.assertEqual(info["format"], "ENCRYPTED")
+
+
+class TestArchiveMemberSet(unittest.TestCase):
+    """测试 get_archive_member_set"""
+
+    def setUp(self):
+        self.test_dir = tempfile.mkdtemp()
+        self.source_dir = os.path.join(self.test_dir, "data")
+        os.makedirs(self.source_dir)
+        (Path(self.source_dir) / "a.txt").write_text("a")
+        (Path(self.source_dir) / "sub").mkdir()
+        (Path(self.source_dir) / "sub" / "b.txt").write_text("b")
+
+    def tearDown(self):
+        shutil.rmtree(self.test_dir, ignore_errors=True)
+
+    def test_member_set_zip(self):
+        """测试 ZIP 成员集合"""
+        from sbackup.compression import get_archive_member_set, create_compressor
+
+        zip_path = os.path.join(self.test_dir, "test.zip")
+        config = Config(
+            folder_path=self.source_dir,
+            zipfile_path=zip_path,
+            skip_patterns=[],
+        )
+        create_compressor(config).compress()
+        members = get_archive_member_set(zip_path)
+        self.assertIsInstance(members, set)
+        self.assertTrue(len(members) > 0)
+        # 不应包含目录条目
+        for m in members:
+            self.assertFalse(m.endswith("/"))
+
+    def test_member_set_nonexistent(self):
+        """测试不存在的文件返回空集合"""
+        from sbackup.compression import get_archive_member_set
+
+        members = get_archive_member_set("/nonexistent/file.zip")
+        self.assertEqual(len(members), 0)
+
+    def test_member_set_tar_gz(self):
+        """测试 tar.gz 成员集合"""
+        from sbackup.compression import get_archive_member_set, create_compressor
+
+        path = os.path.join(self.test_dir, "test.tar.gz")
+        config = Config(
+            folder_path=self.source_dir,
+            zipfile_path=path,
+            compression_format="TAR_GZ",
+            skip_patterns=[],
+        )
+        create_compressor(config).compress()
+        members = get_archive_member_set(path)
+        self.assertTrue(len(members) > 0)
+
+
+class TestSearchInBackup(unittest.TestCase):
+    """测试 search_in_backup"""
+
+    def setUp(self):
+        self.test_dir = tempfile.mkdtemp()
+        self.source_dir = os.path.join(self.test_dir, "data")
+        os.makedirs(self.source_dir)
+        (Path(self.source_dir) / "readme.txt").write_text("readme")
+        (Path(self.source_dir) / "data.csv").write_text("csv")
+        (Path(self.source_dir) / "image.png").write_text("png")
+        (Path(self.source_dir) / "sub").mkdir()
+        (Path(self.source_dir) / "sub" / "nested.txt").write_text("nested")
+        self.zip_path = os.path.join(self.test_dir, "test.zip")
+        config = Config(
+            folder_path=self.source_dir,
+            zipfile_path=self.zip_path,
+            skip_patterns=[],
+        )
+        create_compressor(config).compress()
+
+    def tearDown(self):
+        shutil.rmtree(self.test_dir, ignore_errors=True)
+
+    def test_search_glob_pattern(self):
+        """测试 glob 通配符搜索"""
+        from sbackup.compression import search_in_backup
+
+        results = search_in_backup(self.zip_path, "*.txt")
+        self.assertTrue(len(results) > 0)
+        for r in results:
+            self.assertTrue(r.endswith(".txt"))
+
+    def test_search_specific_file(self):
+        """测试搜索特定文件名"""
+        from sbackup.compression import search_in_backup
+
+        results = search_in_backup(self.zip_path, "data.csv")
+        self.assertEqual(len(results), 1)
+
+    def test_search_no_match(self):
+        """测试无匹配结果"""
+        from sbackup.compression import search_in_backup
+
+        results = search_in_backup(self.zip_path, "*.xyz")
+        self.assertEqual(len(results), 0)
+
+    def test_search_nonexistent_file(self):
+        """测试不存在的备份文件"""
+        from sbackup.compression import search_in_backup
+
+        results = search_in_backup("/nonexistent/file.zip", "*.txt")
+        self.assertEqual(len(results), 0)
+
+    def test_search_nested_files(self):
+        """测试搜索嵌套目录中的文件"""
+        from sbackup.compression import search_in_backup
+
+        results = search_in_backup(self.zip_path, "*.txt")
+        has_nested = any("nested" in r for r in results)
+        self.assertTrue(has_nested)
+
+
+class TestRegexIgnore(unittest.TestCase):
+    """测试正则表达式忽略规则"""
+
+    def setUp(self):
+        self.test_dir = tempfile.mkdtemp()
+        (Path(self.test_dir) / "file.txt").write_text("txt")
+        (Path(self.test_dir) / "file.log").write_text("log")
+        (Path(self.test_dir) / "data.csv").write_text("csv")
+        (Path(self.test_dir) / "backup.bak").write_text("bak")
+        self.zip_path = os.path.join(self.test_dir, "test.zip")
+
+    def tearDown(self):
+        shutil.rmtree(self.test_dir, ignore_errors=True)
+
+    def test_regex_ignore_log_files(self):
+        """测试正则忽略 .log 文件"""
+        config = Config(
+            folder_path=self.test_dir,
+            zipfile_path=self.zip_path,
+            skip_patterns=[r"re:.*\.log$"],
+        )
+        compressor = ZipfileCompression(config)
+        result = compressor.compress()
+        self.assertTrue(result["success"])
+        with zipfile.ZipFile(self.zip_path, "r") as zf:
+            names = zf.namelist()
+            self.assertFalse(any(n.endswith(".log") for n in names))
+            self.assertTrue(any(n.endswith(".txt") for n in names))
+
+    def test_regex_negation(self):
+        """测试正则取反模式"""
+        config = Config(
+            folder_path=self.test_dir,
+            zipfile_path=self.zip_path,
+            skip_patterns=[r"re:.*\.(log|bak)$", r"!re:.*backup\.bak$"],
+        )
+        compressor = ZipfileCompression(config)
+        result = compressor.compress()
+        self.assertTrue(result["success"])
+        with zipfile.ZipFile(self.zip_path, "r") as zf:
+            names = zf.namelist()
+            self.assertFalse(any("file.log" in n for n in names))
+            self.assertTrue(any("backup.bak" in n for n in names))
+
+    def test_invalid_regex_ignored(self):
+        """测试无效正则表达式被安全忽略"""
+        config = Config(
+            folder_path=self.test_dir,
+            zipfile_path=self.zip_path,
+            skip_patterns=[r"re:[invalid"],
+        )
+        compressor = ZipfileCompression(config)
+        result = compressor.compress()
+        self.assertTrue(result["success"])
 
 
 if __name__ == "__main__":

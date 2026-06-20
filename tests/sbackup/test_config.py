@@ -5,9 +5,10 @@
 import unittest
 import os
 import tempfile
+import shutil
 import json
 from unittest.mock import patch
-from sbackup.config import load_config, save_lang, save_format
+from sbackup.config import load_config, save_lang, save_format, save_sftp_config
 
 
 class TestConfig(unittest.TestCase):
@@ -222,6 +223,423 @@ class TestSaveFormat(unittest.TestCase):
         """测试写入失败"""
         mock_open.side_effect = OSError("disk full")
         save_format("tar.gz", self.config_file)
+
+
+class TestSaveSftpConfig(unittest.TestCase):
+    def setUp(self):
+        self.test_dir = tempfile.mkdtemp()
+        self.config_file = os.path.join(self.test_dir, "config.json")
+
+    def tearDown(self):
+        if os.path.exists(self.test_dir):
+            import shutil
+
+            shutil.rmtree(self.test_dir)
+
+    def test_save_sftp_config_creates_new_file(self):
+        """测试 save_sftp_config 创建新配置文件"""
+        save_sftp_config(
+            "host.com",
+            2222,
+            "admin",
+            "secret",
+            "/backups",
+            key_file="/path/to/key",
+            key_passphrase="keypass",
+            config_file=self.config_file,
+        )
+        self.assertTrue(os.path.exists(self.config_file))
+        with open(self.config_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        self.assertEqual(data["sftp"]["host"], "host.com")
+        self.assertEqual(data["sftp"]["port"], 2222)
+        self.assertEqual(data["sftp"]["user"], "admin")
+        self.assertEqual(data["sftp"]["password"], "secret")
+        self.assertEqual(data["sftp"]["key_file"], "/path/to/key")
+        self.assertEqual(data["sftp"]["key_passphrase"], "keypass")
+        self.assertEqual(data["sftp"]["remote_path"], "/backups")
+        self.assertTrue(data["sftp"]["enabled"])
+
+    def test_save_sftp_config_updates_existing(self):
+        """测试 save_sftp_config 更新已有配置"""
+        with open(self.config_file, "w", encoding="utf-8") as f:
+            json.dump({"lang": "zh_CN", "compression_format": "zip"}, f)
+        save_sftp_config(
+            "newhost",
+            22,
+            "user",
+            "pass",
+            "/",
+            key_file="",
+            key_passphrase="",
+            config_file=self.config_file,
+        )
+        with open(self.config_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        self.assertEqual(data["sftp"]["host"], "newhost")
+        self.assertEqual(data["lang"], "zh_CN")
+        self.assertEqual(data["compression_format"], "zip")
+
+    def test_save_sftp_config_disabled(self):
+        """测试 save_sftp_config 禁用 SFTP"""
+        save_sftp_config(
+            "host",
+            22,
+            "user",
+            "pass",
+            "/",
+            enabled=False,
+            key_file="",
+            key_passphrase="",
+            config_file=self.config_file,
+        )
+        with open(self.config_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        self.assertFalse(data["sftp"]["enabled"])
+
+    def test_save_sftp_config_malformed_json(self):
+        """测试配置文件损坏时 save_sftp_config 重置"""
+        with open(self.config_file, "w") as f:
+            f.write("{bad")
+        save_sftp_config(
+            "host",
+            22,
+            "user",
+            "pass",
+            "/",
+            key_file="",
+            key_passphrase="",
+            config_file=self.config_file,
+        )
+        with open(self.config_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        self.assertEqual(data["sftp"]["host"], "host")
+
+    @patch("os.makedirs")
+    def test_save_sftp_config_makedirs_error(self, mock_makedirs):
+        """测试创建目录失败"""
+        mock_makedirs.side_effect = OSError("denied")
+        save_sftp_config(
+            "host",
+            22,
+            "user",
+            "pass",
+            "/",
+            key_file="",
+            key_passphrase="",
+            config_file=self.config_file,
+        )
+
+    @patch("builtins.open")
+    def test_save_sftp_config_write_error(self, mock_open):
+        """测试写入失败"""
+        mock_open.side_effect = OSError("disk full")
+        save_sftp_config("host", 22, "user", "pass", "/", config_file=self.config_file)
+
+    def test_load_config_with_sftp(self):
+        """测试 load_config 读取 SFTP 配置"""
+        config_data = {
+            "lang": "en_US",
+            "sftp": {
+                "host": "sftp.example.com",
+                "port": 2222,
+                "user": "backup",
+                "password": "s3cret",
+                "remote_path": "/data/backups",
+                "enabled": True,
+            },
+        }
+        with open(self.config_file, "w", encoding="utf-8") as f:
+            json.dump(config_data, f)
+        config = load_config(self.config_file)
+        self.assertEqual(config.sftp_host, "sftp.example.com")
+        self.assertEqual(config.sftp_port, 2222)
+        self.assertEqual(config.sftp_user, "backup")
+        self.assertEqual(config.sftp_password, "s3cret")
+        self.assertEqual(config.sftp_remote_path, "/data/backups")
+        self.assertTrue(config.sftp_enabled)
+
+    def test_load_config_sftp_defaults(self):
+        """测试 load_config 无 SFTP 配置时使用默认值"""
+        config_data = {"lang": "en_US"}
+        with open(self.config_file, "w", encoding="utf-8") as f:
+            json.dump(config_data, f)
+        config = load_config(self.config_file)
+        self.assertEqual(config.sftp_host, "")
+        self.assertEqual(config.sftp_port, 22)
+        self.assertEqual(config.sftp_user, "")
+        self.assertEqual(config.sftp_password, "")
+        self.assertEqual(config.sftp_remote_path, "/")
+        self.assertFalse(config.sftp_enabled)
+
+    def test_load_config_with_sftp_key(self):
+        """测试加载包含私钥的 SFTP 配置"""
+        config_data = {
+            "sftp": {
+                "host": "keyhost",
+                "port": 2222,
+                "user": "keyuser",
+                "password": "",
+                "key_file": "/home/user/.ssh/id_rsa",
+                "key_passphrase": "keypass",
+                "remote_path": "/backups",
+                "enabled": True,
+            }
+        }
+        with open(self.config_file, "w", encoding="utf-8") as f:
+            json.dump(config_data, f)
+        config = load_config(self.config_file)
+        self.assertEqual(config.sftp_host, "keyhost")
+        self.assertEqual(config.sftp_port, 2222)
+        self.assertEqual(config.sftp_user, "keyuser")
+        self.assertEqual(config.sftp_key_file, "/home/user/.ssh/id_rsa")
+        self.assertEqual(config.sftp_key_passphrase, "keypass")
+        self.assertTrue(config.sftp_enabled)
+
+    def test_load_config_default_lang_zh_cn(self):
+        """测试 config.json 缺少 lang 字段时默认为 zh_CN"""
+        with open(self.config_file, "w", encoding="utf-8") as f:
+            json.dump({"compression_format": "ZIP"}, f)
+        config = load_config(self.config_file)
+        self.assertEqual(config.lang, "zh_CN")
+
+    def test_load_config_with_webdav(self):
+        """测试加载包含 WebDAV 配置"""
+        config_data = {
+            "webdav": {
+                "url": "https://dav.jianguoyun.com/dav/",
+                "user": "user@example.com",
+                "password": "secret",
+                "remote_path": "/backups",
+                "enabled": True,
+            }
+        }
+        with open(self.config_file, "w", encoding="utf-8") as f:
+            json.dump(config_data, f)
+        config = load_config(self.config_file)
+        self.assertEqual(config.webdav_url, "https://dav.jianguoyun.com/dav/")
+        self.assertEqual(config.webdav_user, "user@example.com")
+        self.assertEqual(config.webdav_password, "secret")
+        self.assertEqual(config.webdav_remote_path, "/backups")
+        self.assertTrue(config.webdav_enabled)
+
+    def test_load_config_webdav_defaults(self):
+        """测试 WebDAV 配置默认值"""
+        with open(self.config_file, "w", encoding="utf-8") as f:
+            json.dump({}, f)
+        config = load_config(self.config_file)
+        self.assertEqual(config.webdav_url, "")
+        self.assertEqual(config.webdav_user, "")
+        self.assertEqual(config.webdav_password, "")
+        self.assertEqual(config.webdav_remote_path, "/")
+        self.assertFalse(config.webdav_enabled)
+
+    def test_save_webdav_config_creates_new_file(self):
+        """测试 save_webdav_config 创建新配置文件"""
+        from sbackup.config import save_webdav_config
+
+        save_webdav_config(
+            "https://dav.example.com/dav/",
+            "user@test.com",
+            "pass123",
+            "/backups",
+            config_file=self.config_file,
+        )
+        self.assertTrue(os.path.exists(self.config_file))
+        with open(self.config_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        self.assertEqual(data["webdav"]["url"], "https://dav.example.com/dav/")
+        self.assertEqual(data["webdav"]["user"], "user@test.com")
+        self.assertEqual(data["webdav"]["password"], "pass123")
+        self.assertEqual(data["webdav"]["remote_path"], "/backups")
+        self.assertTrue(data["webdav"]["enabled"])
+
+    def test_save_webdav_config_updates_existing(self):
+        """测试 save_webdav_config 更新已有配置"""
+        from sbackup.config import save_webdav_config
+
+        with open(self.config_file, "w", encoding="utf-8") as f:
+            json.dump({"lang": "zh_CN"}, f)
+        save_webdav_config(
+            "https://dav.example.com/",
+            "user",
+            "pass",
+            "/",
+            config_file=self.config_file,
+        )
+        with open(self.config_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        self.assertEqual(data["webdav"]["url"], "https://dav.example.com/")
+        self.assertEqual(data["lang"], "zh_CN")
+
+
+class TestJsonHelpers(unittest.TestCase):
+    """测试 _load_json_file 和 _save_json_file 辅助函数"""
+
+    def setUp(self):
+        self.test_dir = tempfile.mkdtemp()
+        self.config_file = os.path.join(self.test_dir, "config.json")
+
+    def tearDown(self):
+        import shutil
+
+        shutil.rmtree(self.test_dir, ignore_errors=True)
+
+    def test_load_json_file_nonexistent(self):
+        """测试加载不存在的文件返回空字典"""
+        from sbackup.config import _load_json_file
+
+        result = _load_json_file("/nonexistent/file.json")
+        self.assertEqual(result, {})
+
+    def test_load_json_file_valid(self):
+        """测试加载有效的 JSON 文件"""
+        from sbackup.config import _load_json_file
+
+        with open(self.config_file, "w", encoding="utf-8") as f:
+            json.dump({"key": "value"}, f)
+        result = _load_json_file(self.config_file)
+        self.assertEqual(result, {"key": "value"})
+
+    def test_load_json_file_malformed(self):
+        """测试加载损坏的 JSON 文件返回空字典"""
+        from sbackup.config import _load_json_file
+
+        with open(self.config_file, "w") as f:
+            f.write("{bad json")
+        result = _load_json_file(self.config_file)
+        self.assertEqual(result, {})
+
+    def test_save_json_file_creates_dir(self):
+        """测试自动创建目录"""
+        from sbackup.config import _save_json_file
+
+        nested_file = os.path.join(self.test_dir, "sub", "config.json")
+        _save_json_file({"test": True}, nested_file)
+        self.assertTrue(os.path.exists(nested_file))
+        with open(nested_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        self.assertEqual(data, {"test": True})
+
+    @patch("os.makedirs")
+    def test_save_json_file_makedirs_error(self, mock_makedirs):
+        """测试目录创建失败时静默返回"""
+        from sbackup.config import _save_json_file
+
+        mock_makedirs.side_effect = OSError("denied")
+        nested_file = os.path.join(self.test_dir, "sub", "config.json")
+        _save_json_file({"test": True}, nested_file)
+        # 不应抛出异常
+
+    @patch("builtins.open")
+    def test_save_json_file_write_error(self, mock_open):
+        """测试写入失败时静默处理"""
+        from sbackup.config import _save_json_file
+
+        mock_open.side_effect = OSError("disk full")
+        _save_json_file({"test": True}, self.config_file)
+        # 不应抛出异常
+
+
+class TestGenerateConfigTemplate(unittest.TestCase):
+    """测试 generate_config_template"""
+
+    def setUp(self):
+        self.test_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.test_dir, ignore_errors=True)
+
+    def test_generate_template(self):
+        """测试生成完整配置模板"""
+        from sbackup.config import generate_config_template
+
+        config_file = os.path.join(self.test_dir, "config.json")
+        generate_config_template(config_file)
+        self.assertTrue(os.path.exists(config_file))
+        with open(config_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        self.assertIn("lang", data)
+        self.assertIn("compression_format", data)
+        self.assertIn("compression", data)
+        self.assertIn("sftp", data)
+        self.assertIn("webdav", data)
+        self.assertIn("webhook", data)
+        self.assertIn("skip_patterns", data)
+        self.assertEqual(data["lang"], "zh_CN")
+
+    def test_generate_template_webhook_structure(self):
+        """测试 webhook 配置结构"""
+        from sbackup.config import generate_config_template
+
+        config_file = os.path.join(self.test_dir, "config.json")
+        generate_config_template(config_file)
+        with open(config_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        webhook = data["webhook"]
+        self.assertIn("urls", webhook)
+        self.assertIn("template", webhook)
+        self.assertIn("retries", webhook)
+        self.assertIsInstance(webhook["urls"], list)
+
+
+class TestWebhookConfigLoading(unittest.TestCase):
+    """测试 webhook 配置加载的向后兼容性"""
+
+    def setUp(self):
+        self.test_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.test_dir, ignore_errors=True)
+
+    def test_load_legacy_webhook_url(self):
+        """测试加载旧版单个 url 字段"""
+        from sbackup.config import load_config
+
+        config_file = os.path.join(self.test_dir, "config.json")
+        with open(config_file, "w", encoding="utf-8") as f:
+            json.dump({"webhook": {"url": "https://example.com/hook"}}, f)
+        config = load_config(config_file)
+        self.assertEqual(config.webhook_url, "https://example.com/hook")
+        self.assertIn("https://example.com/hook", config.webhook_urls)
+
+    def test_load_webhook_urls_list(self):
+        """测试加载 urls 列表"""
+        from sbackup.config import load_config
+
+        config_file = os.path.join(self.test_dir, "config.json")
+        with open(config_file, "w", encoding="utf-8") as f:
+            json.dump(
+                {"webhook": {"urls": ["https://a.com", "https://b.com"], "retries": 3}},
+                f,
+            )
+        config = load_config(config_file)
+        self.assertEqual(len(config.webhook_urls), 2)
+        self.assertEqual(config.webhook_retries, 3)
+
+    def test_load_webhook_template(self):
+        """测试加载自定义模板"""
+        from sbackup.config import load_config
+
+        config_file = os.path.join(self.test_dir, "config.json")
+        with open(config_file, "w", encoding="utf-8") as f:
+            json.dump(
+                {"webhook": {"template": '{"event":"{status}"}'}},
+                f,
+            )
+        config = load_config(config_file)
+        self.assertEqual(config.webhook_template, '{"event":"{status}"}')
+
+    def test_load_empty_webhook(self):
+        """测试加载空 webhook 配置"""
+        from sbackup.config import load_config
+
+        config_file = os.path.join(self.test_dir, "config.json")
+        with open(config_file, "w", encoding="utf-8") as f:
+            json.dump({"webhook": {}}, f)
+        config = load_config(config_file)
+        self.assertEqual(config.webhook_urls, [])
+        self.assertEqual(config.webhook_retries, 2)
 
 
 if __name__ == "__main__":
