@@ -436,6 +436,31 @@ def get_parser() -> argparse.ArgumentParser:
         help=t("cli.help.restore.cloud"),
     )
 
+    consolidate_parser = subparsers.add_parser(
+        "consolidate", help=t("cli.help.consolidate")
+    )
+    consolidate_parser.add_argument(
+        "source", help=t("cli.help.consolidate.source")
+    )
+    consolidate_parser.add_argument(
+        "--dir", default="", help=t("cli.help.consolidate.dir")
+    )
+    consolidate_parser.add_argument(
+        "--to", type=int, default=0, help=t("cli.help.consolidate.to")
+    )
+    consolidate_parser.add_argument(
+        "--output", default="", help=t("cli.help.consolidate.output")
+    )
+    consolidate_parser.add_argument(
+        "--delete-old", action="store_true", default=False,
+        help=t("cli.help.consolidate.delete_old"),
+    )
+    consolidate_parser.add_argument(
+        "--format", default=None,
+        choices=["zip", "tar", "tar.gz", "tar.bz2", "tar.xz", "tar.zst", "7z"],
+        help=t("cli.help.consolidate.format"),
+    )
+
     info_parser = subparsers.add_parser("info", help=t("cli.help.info"))
     info_parser.add_argument("backup_file", help=t("cli.help.info.file"))
     info_parser.add_argument("--password", default="", help=t("cli.help.info.password"))
@@ -1603,6 +1628,81 @@ def _handle_restore(args, config, manager) -> int:
                 pass
 
 
+def _handle_consolidate(args, config, manager) -> int:
+    """处理 consolidate 命令"""
+    from sbackup.consolidate import consolidate_backups, detect_and_list_backups
+
+    source = parse_path(args.source)
+    source_name = os.path.basename(os.path.normpath(source))
+
+    # 确定备份目录
+    target_dir = args.dir
+    if not target_dir:
+        raw = manager.data.get(source)
+        if raw and len(raw) > 1:
+            target_dir = raw[1]
+        else:
+            target_dir = "."
+
+    if not os.path.isdir(target_dir):
+        print(f"Error: directory not found: {target_dir}")
+        return 1
+
+    # 如果指定了 --to，先列出供用户预览
+    if args.to:
+        listing = detect_and_list_backups(target_dir, source_name, config.password)
+        full_count = len(listing["full"])
+        inc_count = len(listing["incremental"])
+        if full_count == 0:
+            print(t("consolidate.error.no_full_backup"))
+            return 1
+        print(
+            t("cmd.consolidate.preview",
+              source=source_name,
+              target=target_dir,
+              full=full_count,
+              incremental=inc_count)
+        )
+
+    # 解析 --format
+    fmt = config.compression_format
+    if args.format is not None:
+        fmt = args.format.upper().replace(".", "_")
+
+    print(t("cmd.consolidate.start"))
+    result = consolidate_backups(
+        source_name=source_name,
+        target_dir=target_dir,
+        output_path=args.output,
+        count=args.to,
+        delete_old=args.delete_old,
+        password=config.password,
+        compression_format=fmt,
+        compression_algorithm=config.compression_algorithm,
+        compression_level=config.compression_level,
+        threads=config.threads,
+    )
+
+    if result.get("success"):
+        path = result.get("path", "")
+        files = result.get("files_count", 0)
+        size_mb = result.get("size_mb", 0.0)
+        note = result.get("note", "")
+        if note:
+            print(t("cmd.consolidate.noop", reason=note))
+        else:
+            print(
+                t("cmd.consolidate.done",
+                  path=path,
+                  files=files,
+                  size=size_mb)
+            )
+        return 0
+    else:
+        print(t("cmd.consolidate.failed", error=result.get("error", "unknown")))
+        return 1
+
+
 def _handle_info(args, config, manager) -> int:
     from sbackup.compression import get_backup_info, format_backup_info
 
@@ -2540,6 +2640,7 @@ _COMMAND_HANDLERS: dict[str, callable] = {
     "watch": _handle_watch,
     "compress": _handle_compress,
     "restore": _handle_restore,
+    "consolidate": _handle_consolidate,
     "info": _handle_info,
     "diff": _handle_diff,
     "verify": _handle_verify,

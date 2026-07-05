@@ -2,4 +2,10 @@
 
 from sbackup.cli import run, VERSION, get_parser, LocalizedArgumentParser, parse_path
 
-__all__ = ["run", "VERSION", "get_parser", "LocalizedArgumentParser", "parse_path"]
+__all__ = [
+    "run",
+    "VERSION",
+    "get_parser",
+    "LocalizedArgumentParser",
+    "parse_path",
+]
